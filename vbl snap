@@ -73,7 +73,7 @@ local function getAimFacingCFrame(root)
 	end
 
 	local aimDirection
-	if UserInputService.MouseEnabled and not menuOpen then
+	if UserInputService.MouseEnabled then
 		-- Aim through the actual mouse position. Raycast ignores the local
 		-- character so the ray can find the point under the cursor.
 		local mousePosition = UserInputService:GetMouseLocation()
@@ -87,7 +87,7 @@ local function getAimFacingCFrame(root)
 		local aimPoint = hit and hit.Position or (aimRay.Origin + aimRay.Direction * 1200)
 		aimDirection = aimPoint - root.Position
 	else
-		-- Controller/touch or menu-open fallback: use the camera's center look.
+		-- Controller/touch fallback: use the camera's center look.
 		aimDirection = camera.CFrame.LookVector
 	end
 
@@ -195,6 +195,7 @@ local function holdFacingUntilLanding(currentHumanoid)
 	end)
 end
 
+-- This listener stays active when the menu is hidden; only the Enabled toggle stops it.
 UserInputService.JumpRequest:Connect(function()
 	if not jumpRotationEnabled or not humanoid or not rootPart then
 		return
