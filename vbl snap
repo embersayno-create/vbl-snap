@@ -71,40 +71,19 @@ local function getAimFacingCFrame(root)
 		return nil
 	end
 
-	local aimDirection
-	if UserInputService.MouseEnabled then
-		-- Aim through the actual mouse position. Raycast ignores the local
-		-- character so the ray can find the point under the cursor.
-		local mousePosition = UserInputService:GetMouseLocation()
-		local aimRay = camera:ScreenPointToRay(mousePosition.X, mousePosition.Y)
-		local raycastParams = RaycastParams.new()
-		raycastParams.FilterType = Enum.RaycastFilterType.Exclude
-		raycastParams.FilterDescendantsInstances = player.Character and { player.Character } or {}
-		raycastParams.IgnoreWater = true
-
-		local hit = workspace:Raycast(aimRay.Origin, aimRay.Direction * 1200, raycastParams)
-		local aimPoint = hit and hit.Position or (aimRay.Origin + aimRay.Direction * 1200)
-		aimDirection = aimPoint - root.Position
-	else
-		-- Controller/touch fallback: use the camera's center look.
-		aimDirection = camera.CFrame.LookVector
-	end
-
-	-- Characters rotate on the ground plane, so discard the vertical component.
-	local flatAim = Vector3.new(aimDirection.X, 0, aimDirection.Z)
-	if flatAim.Magnitude < 0.001 then
-		local cameraLook = camera.CFrame.LookVector
-		flatAim = Vector3.new(cameraLook.X, 0, cameraLook.Z)
-	end
-	if flatAim.Magnitude < 0.001 then
+	-- Face the direction the camera is looking, not the raycast point beyond
+	-- the character. Flatten it so the avatar stays upright.
+	local look = camera.CFrame.LookVector
+	local flatLook = Vector3.new(look.X, 0, look.Z)
+	if flatLook.Magnitude < 0.001 then
 		local rootLook = root.CFrame.LookVector
-		flatAim = Vector3.new(rootLook.X, 0, rootLook.Z)
+		flatLook = Vector3.new(rootLook.X, 0, rootLook.Z)
 	end
-	if flatAim.Magnitude < 0.001 then
+	if flatLook.Magnitude < 0.001 then
 		return nil
 	end
 
-	return CFrame.lookAt(root.Position, root.Position + flatAim.Unit)
+	return CFrame.lookAt(root.Position, root.Position + flatLook.Unit)
 end
 
 local function turnToTarget(root, targetCFrame)
