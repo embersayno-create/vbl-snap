@@ -15,7 +15,6 @@ local menuOpen = true
 local menuToggleKey = Enum.KeyCode.F1
 local menuKeyCapture = false
 local JUMP_COOLDOWN = 0.18
-local SNAP_YAW_SPEED = math.rad(1200) -- constant turn speed for consistent snaps
 local SMOOTH_TURN_TIME = 0.32
 
 local humanoid
@@ -111,46 +110,25 @@ end
 local function turnToTarget(root, targetCFrame)
 	cancelSmoothTurn()
 
-	local snapMode = rotationMode == "Snap"
-	local startRotation = root.CFrame.Rotation
 	local targetRotation = targetCFrame.Rotation
-	local startedAt = os.clock()
-	local startYaw
-	local yawDelta
-	local duration
-
-	if snapMode then
-		-- Scale duration to the angle, so small and large turns use the same
-		-- angular speed instead of feeling randomly fast or slow.
-		local startLook = root.CFrame.LookVector
-		local targetLook = targetCFrame.LookVector
-		startYaw = math.atan2(-startLook.X, -startLook.Z)
-		local targetYaw = math.atan2(-targetLook.X, -targetLook.Z)
-		yawDelta = math.atan2(math.sin(targetYaw - startYaw), math.cos(targetYaw - startYaw))
-		duration = math.abs(yawDelta) / SNAP_YAW_SPEED
-	else
-		duration = SMOOTH_TURN_TIME
-	end
-
-	if duration < 1 / 120 then
+	if rotationMode == "Snap" then
+		-- Snap is a single CFrame change for a reliable, exact turn.
 		root.CFrame = CFrame.new(root.Position) * targetRotation
 		return
 	end
 
+	-- Smooth mode animates orientation only, preserving the root's live position.
+	local startRotation = root.CFrame.Rotation
+	local startedAt = os.clock()
 	smoothTurnConnection = RunService.Heartbeat:Connect(function()
 		if not root.Parent then
 			cancelSmoothTurn()
 			return
 		end
 
-		local alpha = math.clamp((os.clock() - startedAt) / duration, 0, 1)
+		local alpha = math.clamp((os.clock() - startedAt) / SMOOTH_TURN_TIME, 0, 1)
 		local easedAlpha = alpha * alpha * (3 - 2 * alpha)
-		if snapMode then
-			local yaw = startYaw + yawDelta * easedAlpha
-			root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
-		else
-			root.CFrame = CFrame.new(root.Position) * startRotation:Lerp(targetRotation, easedAlpha)
-		end
+		root.CFrame = CFrame.new(root.Position) * startRotation:Lerp(targetRotation, easedAlpha)
 
 		if alpha >= 1 then
 			root.CFrame = CFrame.new(root.Position) * targetRotation
