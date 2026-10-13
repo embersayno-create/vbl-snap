@@ -1,1 +1,633 @@
+-- LocalScript for your own Roblox experience.
+-- Place in StarterPlayer > StarterPlayerScripts.
+-- F1 shows/hides the menu by default; players can rebind it in Settings.
 
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+
+-- Menu settings
+local jumpRotationEnabled = true
+local rotationMode = "Snap" -- "Snap" or "Smooth"
+local menuOpen = true
+local menuToggleKey = Enum.KeyCode.F1
+local menuKeyCapture = false
+local JUMP_COOLDOWN = 0.18
+local SMOOTH_TURN_TIME = 0.32
+
+local humanoid
+local rootPart
+local lastJumpTime = 0
+
+local rotationLockHumanoid
+local rotationLockAutoRotate
+local rotationStateConnection
+local rotationLockId = 0
+local smoothTurnConnection
+
+local function cancelSmoothTurn()
+	if smoothTurnConnection then
+		smoothTurnConnection:Disconnect()
+		smoothTurnConnection = nil
+	end
+end
+
+local function releaseRotationLock()
+	rotationLockId += 1
+
+	if rotationStateConnection then
+		rotationStateConnection:Disconnect()
+		rotationStateConnection = nil
+	end
+
+	local oldHumanoid = rotationLockHumanoid
+	local oldAutoRotate = rotationLockAutoRotate
+	rotationLockHumanoid = nil
+	rotationLockAutoRotate = nil
+
+	if oldHumanoid and oldHumanoid.Parent and oldAutoRotate ~= nil then
+		oldHumanoid.AutoRotate = oldAutoRotate
+	end
+end
+
+local function bindCharacter(character)
+	releaseRotationLock()
+	cancelSmoothTurn()
+
+	humanoid = character:WaitForChild("Humanoid")
+	rootPart = character:WaitForChild("HumanoidRootPart")
+end
+
+player.CharacterAdded:Connect(bindCharacter)
+if player.Character then
+	bindCharacter(player.Character)
+end
+
+local function getAimFacingCFrame(root)
+	local camera = workspace.CurrentCamera
+	if not camera then
+		return nil
+	end
+
+	local aimDirection
+	if UserInputService.MouseEnabled then
+		-- Aim through the actual mouse position. Raycast ignores the local
+		-- character so the ray can find the point under the cursor.
+		local mousePosition = UserInputService:GetMouseLocation()
+		local aimRay = camera:ScreenPointToRay(mousePosition.X, mousePosition.Y)
+		local raycastParams = RaycastParams.new()
+		raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+		raycastParams.FilterDescendantsInstances = player.Character and { player.Character } or {}
+		raycastParams.IgnoreWater = true
+
+		local hit = workspace:Raycast(aimRay.Origin, aimRay.Direction * 1200, raycastParams)
+		local aimPoint = hit and hit.Position or (aimRay.Origin + aimRay.Direction * 1200)
+		aimDirection = aimPoint - root.Position
+	else
+		-- Controller/touch fallback: use the camera's center look.
+		aimDirection = camera.CFrame.LookVector
+	end
+
+	-- Characters rotate on the ground plane, so discard the vertical component.
+	local flatAim = Vector3.new(aimDirection.X, 0, aimDirection.Z)
+	if flatAim.Magnitude < 0.001 then
+		local cameraLook = camera.CFrame.LookVector
+		flatAim = Vector3.new(cameraLook.X, 0, cameraLook.Z)
+	end
+	if flatAim.Magnitude < 0.001 then
+		local rootLook = root.CFrame.LookVector
+		flatAim = Vector3.new(rootLook.X, 0, rootLook.Z)
+	end
+	if flatAim.Magnitude < 0.001 then
+		return nil
+	end
+
+	return CFrame.lookAt(root.Position, root.Position + flatAim.Unit)
+end
+
+local function turnToTarget(root, targetCFrame)
+	cancelSmoothTurn()
+
+	local targetRotation = targetCFrame.Rotation
+	if rotationMode == "Snap" then
+		-- Snap is a single CFrame change for a reliable, exact turn.
+		root.CFrame = CFrame.new(root.Position) * targetRotation
+		return
+	end
+
+	-- Smooth mode animates orientation only, preserving the root's live position.
+	local startRotation = root.CFrame.Rotation
+	local startedAt = os.clock()
+	smoothTurnConnection = RunService.Heartbeat:Connect(function()
+		if not root.Parent then
+			cancelSmoothTurn()
+			return
+		end
+
+		local alpha = math.clamp((os.clock() - startedAt) / SMOOTH_TURN_TIME, 0, 1)
+		local easedAlpha = alpha * alpha * (3 - 2 * alpha)
+		root.CFrame = CFrame.new(root.Position) * startRotation:Lerp(targetRotation, easedAlpha)
+
+		if alpha >= 1 then
+			root.CFrame = CFrame.new(root.Position) * targetRotation
+			cancelSmoothTurn()
+		end
+	end)
+end
+
+local function holdFacingUntilLanding(currentHumanoid)
+	releaseRotationLock()
+
+	rotationLockHumanoid = currentHumanoid
+	rotationLockAutoRotate = currentHumanoid.AutoRotate
+	currentHumanoid.AutoRotate = false
+
+	rotationLockId += 1
+	local thisLockId = rotationLockId
+	local state = currentHumanoid:GetState()
+	local hasBeenAirborne = state == Enum.HumanoidStateType.Jumping
+		or state == Enum.HumanoidStateType.Freefall
+
+	rotationStateConnection = currentHumanoid.StateChanged:Connect(function(_, newState)
+		if thisLockId ~= rotationLockId then
+			return
+		end
+
+		if newState == Enum.HumanoidStateType.Jumping
+			or newState == Enum.HumanoidStateType.Freefall then
+			hasBeenAirborne = true
+		elseif hasBeenAirborne
+			and (newState == Enum.HumanoidStateType.Landed
+				or newState == Enum.HumanoidStateType.Running) then
+			releaseRotationLock()
+		end
+	end)
+
+	-- Failsafe in case the character never reports a landing state.
+	task.delay(2, function()
+		if thisLockId == rotationLockId then
+			releaseRotationLock()
+		end
+	end)
+end
+
+-- This listener stays active when the menu is hidden; only the Enabled toggle stops it.
+UserInputService.JumpRequest:Connect(function()
+	if not jumpRotationEnabled or not humanoid or not rootPart then
+		return
+	end
+	if humanoid.Health <= 0 or not rootPart.Parent then
+		return
+	end
+	if os.clock() - lastJumpTime < JUMP_COOLDOWN then
+		return
+	end
+
+	local targetCFrame = getAimFacingCFrame(rootPart)
+	if not targetCFrame then
+		return
+	end
+
+	lastJumpTime = os.clock()
+	cancelSmoothTurn()
+	holdFacingUntilLanding(humanoid)
+	turnToTarget(rootPart, targetCFrame)
+end)
+
+-- Build the menu.
+local function make(className, properties, parent)
+	local object = Instance.new(className)
+	for property, value in pairs(properties) do
+		object[property] = value
+	end
+	object.Parent = parent
+	return object
+end
+
+local colors = {
+	background = Color3.fromRGB(7, 9, 9),
+	panel = Color3.fromRGB(10, 11, 12),
+	panelHover = Color3.fromRGB(17, 20, 20),
+	border = Color3.fromRGB(34, 39, 38),
+	text = Color3.fromRGB(203, 208, 206),
+	muted = Color3.fromRGB(112, 119, 116),
+	green = Color3.fromRGB(0, 205, 145),
+}
+
+local playerGui = player:WaitForChild("PlayerGui")
+local screenGui = make("ScreenGui", {
+	Name = "JumpRotationMenu",
+	ResetOnSpawn = false,
+	IgnoreGuiInset = false,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	DisplayOrder = 20,
+}, playerGui)
+
+local window = make("Frame", {
+	Name = "Window",
+	Size = UDim2.fromOffset(414, 166),
+	Position = UDim2.new(0, 8, 0, 8),
+	BackgroundColor3 = colors.background,
+	BorderSizePixel = 0,
+	Visible = true,
+}, screenGui)
+make("UIStroke", { Color = colors.border, Thickness = 1 }, window)
+make("UICorner", { CornerRadius = UDim.new(0, 3) }, window)
+
+make("Frame", {
+	Name = "GreenTopLine",
+	Size = UDim2.new(1, 0, 0, 2),
+	Position = UDim2.new(0, 0, 0, 0),
+	BackgroundColor3 = colors.green,
+	BorderSizePixel = 0,
+	ZIndex = 3,
+}, window)
+
+local header = make("Frame", {
+	Name = "Header",
+	Position = UDim2.new(0, 0, 0, 2),
+	Size = UDim2.new(1, 0, 0, 23),
+	BackgroundColor3 = Color3.fromRGB(9, 11, 11),
+	BorderSizePixel = 0,
+	Active = true,
+}, window)
+make("TextLabel", {
+	Name = "Title",
+	Position = UDim2.new(0, 8, 0, 0),
+	Size = UDim2.new(0, 135, 1, 0),
+	BackgroundTransparency = 1,
+	Text = "Volleyball Legends",
+	TextColor3 = colors.text,
+	TextSize = 13,
+	Font = Enum.Font.Code,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	ZIndex = 4,
+}, header)
+make("TextLabel", {
+	Name = "Heart",
+	Position = UDim2.new(0, 144, 0, 0),
+	Size = UDim2.new(0, 16, 1, 0),
+	BackgroundTransparency = 1,
+	Text = "♥",
+	TextColor3 = colors.green,
+	TextSize = 13,
+	Font = Enum.Font.Code,
+	ZIndex = 4,
+}, header)
+
+local sidebar = make("Frame", {
+	Name = "Sidebar",
+	Position = UDim2.new(0, 0, 0, 25),
+	Size = UDim2.new(0, 96, 1, -25),
+	BackgroundColor3 = colors.background,
+	BorderSizePixel = 0,
+}, window)
+
+local card = make("Frame", {
+	Name = "ContentPanel",
+	Position = UDim2.new(0, 100, 0, 35),
+	Size = UDim2.new(1, -108, 1, -43),
+	BackgroundColor3 = colors.panel,
+	BorderSizePixel = 0,
+	ClipsDescendants = false,
+}, window)
+make("UIStroke", { Color = Color3.fromRGB(24, 28, 27), Thickness = 1 }, card)
+
+local function makeNavButton(label, y)
+	local button = make("TextButton", {
+		Size = UDim2.new(1, -8, 0, 28),
+		Position = UDim2.new(0, 8, 0, y),
+		BackgroundColor3 = colors.background,
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Text = label,
+		TextColor3 = colors.muted,
+		TextSize = 12,
+		Font = Enum.Font.Code,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		AutoButtonColor = false,
+	}, sidebar)
+	local marker = make("Frame", {
+		Size = UDim2.new(0, 2, 1, 0),
+		Position = UDim2.new(0, 0, 0, 0),
+		BackgroundColor3 = colors.green,
+		BorderSizePixel = 0,
+		Visible = false,
+	}, button)
+	return button, marker
+end
+
+local vblButton, vblMarker = makeNavButton("VBL", 12)
+local settingsButton, settingsMarker = makeNavButton("Settings", 48)
+
+local vblPage = make("Frame", {
+	Name = "VBLPage",
+	Size = UDim2.fromScale(1, 1),
+	BackgroundTransparency = 1,
+	Visible = true,
+}, card)
+local settingsPage = make("Frame", {
+	Name = "SettingsPage",
+	Size = UDim2.fromScale(1, 1),
+	BackgroundTransparency = 1,
+	Visible = false,
+}, card)
+
+make("TextLabel", {
+	Name = "SectionTitle",
+	Position = UDim2.new(0, 9, 0, 6),
+	Size = UDim2.new(1, -18, 0, 21),
+	BackgroundTransparency = 1,
+	Text = "Jump Rotation",
+	TextColor3 = colors.text,
+	TextSize = 13,
+	Font = Enum.Font.Code,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, vblPage)
+
+local function makeCheckbox(parent, y, label, getValue, onChanged)
+	local row = make("TextButton", {
+		Size = UDim2.new(1, -16, 0, 22),
+		Position = UDim2.new(0, 8, 0, y),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Text = "",
+		AutoButtonColor = false,
+	}, parent)
+
+	local box = make("Frame", {
+		Size = UDim2.fromOffset(14, 14),
+		Position = UDim2.new(0, 0, 0.5, -7),
+		BackgroundColor3 = colors.background,
+		BorderSizePixel = 0,
+	}, row)
+	local boxStroke = make("UIStroke", { Color = colors.border, Thickness = 1 }, box)
+	make("TextLabel", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Text = "✓",
+		TextColor3 = colors.green,
+		TextSize = 12,
+		Font = Enum.Font.Code,
+		Visible = false,
+	}, box)
+
+	local labelObject = make("TextLabel", {
+		Position = UDim2.new(0, 23, 0, 0),
+		Size = UDim2.new(1, -23, 1, 0),
+		BackgroundTransparency = 1,
+		Text = label,
+		TextColor3 = colors.muted,
+		TextSize = 12,
+		Font = Enum.Font.Code,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, row)
+	local checkMark = box:FindFirstChildOfClass("TextLabel")
+
+	local function refresh()
+		local checked = getValue()
+		checkMark.Visible = checked
+		boxStroke.Color = checked and colors.green or colors.border
+		labelObject.TextColor3 = checked and colors.text or colors.muted
+	end
+
+	row.Activated:Connect(function()
+		onChanged(not getValue())
+		refresh()
+	end)
+	refresh()
+	return refresh
+end
+
+local refreshEnabledCheckbox = makeCheckbox(
+	vblPage,
+	32,
+	"Enabled",
+	function()
+		return jumpRotationEnabled
+	end,
+	function(value)
+		jumpRotationEnabled = value
+		if not value then
+			releaseRotationLock()
+		end
+	end
+)
+
+make("TextLabel", {
+	Position = UDim2.new(0, 8, 0, 59),
+	Size = UDim2.new(0, 58, 0, 22),
+	BackgroundTransparency = 1,
+	Text = "Mode",
+	TextColor3 = colors.muted,
+	TextSize = 12,
+	Font = Enum.Font.Code,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, vblPage)
+
+local modeButton = make("TextButton", {
+	Position = UDim2.new(0, 68, 0, 56),
+	Size = UDim2.new(1, -77, 0, 23),
+	BackgroundColor3 = Color3.fromRGB(7, 8, 8),
+	BorderSizePixel = 0,
+	Text = "",
+	AutoButtonColor = false,
+	ZIndex = 4,
+}, vblPage)
+make("UIStroke", { Color = colors.border, Thickness = 1 }, modeButton)
+local modeText = make("TextLabel", {
+	Position = UDim2.new(0, 8, 0, 0),
+	Size = UDim2.new(1, -28, 1, 0),
+	BackgroundTransparency = 1,
+	Text = rotationMode,
+	TextColor3 = colors.text,
+	TextSize = 12,
+	Font = Enum.Font.Code,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	ZIndex = 5,
+}, modeButton)
+make("TextLabel", {
+	Position = UDim2.new(1, -22, 0, 0),
+	Size = UDim2.new(0, 18, 1, 0),
+	BackgroundTransparency = 1,
+	Text = "▼",
+	TextColor3 = colors.muted,
+	TextSize = 9,
+	Font = Enum.Font.Code,
+	ZIndex = 5,
+}, modeButton)
+
+local modeOptions = make("Frame", {
+	Name = "ModeOptions",
+	Position = UDim2.new(0, 68, 0, 80),
+	Size = UDim2.new(1, -77, 0, 48),
+	BackgroundColor3 = Color3.fromRGB(8, 9, 9),
+	BorderSizePixel = 0,
+	Visible = false,
+	ZIndex = 20,
+}, vblPage)
+make("UIStroke", { Color = colors.border, Thickness = 1 }, modeOptions)
+
+local function setRotationMode(value)
+	rotationMode = value
+	modeText.Text = value
+	modeOptions.Visible = false
+end
+
+for index, optionName in ipairs({ "Snap", "Smooth" }) do
+	local optionButton = make("TextButton", {
+		Position = UDim2.new(0, 0, 0, (index - 1) * 24),
+		Size = UDim2.new(1, 0, 0, 24),
+		BackgroundColor3 = colors.background,
+		BorderSizePixel = 0,
+		Text = optionName,
+		TextColor3 = colors.text,
+		TextSize = 12,
+		Font = Enum.Font.Code,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		AutoButtonColor = false,
+		ZIndex = 21,
+	}, modeOptions)
+	optionButton.Activated:Connect(function()
+		setRotationMode(optionName)
+	end)
+end
+
+modeButton.Activated:Connect(function()
+	modeOptions.Visible = not modeOptions.Visible
+end)
+
+make("TextLabel", {
+	Position = UDim2.new(0, 9, 0, 8),
+	Size = UDim2.new(1, -18, 0, 21),
+	BackgroundTransparency = 1,
+	Text = "Settings",
+	TextColor3 = colors.text,
+	TextSize = 13,
+	Font = Enum.Font.Code,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, settingsPage)
+make("TextLabel", {
+	Position = UDim2.new(0, 9, 0, 35),
+	Size = UDim2.new(0, 105, 0, 24),
+	BackgroundTransparency = 1,
+	Text = "Menu toggle",
+	TextColor3 = colors.muted,
+	TextSize = 12,
+	Font = Enum.Font.Code,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, settingsPage)
+
+local menuBindButton = make("TextButton", {
+	Position = UDim2.new(1, -91, 0, 35),
+	Size = UDim2.fromOffset(78, 23),
+	BackgroundColor3 = Color3.fromRGB(7, 8, 8),
+	BorderSizePixel = 0,
+	Text = menuToggleKey.Name,
+	TextColor3 = colors.text,
+	TextSize = 12,
+	Font = Enum.Font.Code,
+	AutoButtonColor = false,
+}, settingsPage)
+make("UIStroke", { Color = colors.border, Thickness = 1 }, menuBindButton)
+menuBindButton.Activated:Connect(function()
+	menuKeyCapture = true
+	menuBindButton.Text = "Press key..."
+end)
+
+make("TextLabel", {
+	Position = UDim2.new(0, 9, 0, 65),
+	Size = UDim2.new(1, -18, 0, 44),
+	BackgroundTransparency = 1,
+	Text = "Click the key box, then press a key.\nEscape cancels the change.",
+	TextColor3 = colors.muted,
+	TextSize = 12,
+	Font = Enum.Font.Code,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	TextYAlignment = Enum.TextYAlignment.Top,
+}, settingsPage)
+
+local function selectPage(pageName)
+	local showVbl = pageName == "VBL"
+	vblPage.Visible = showVbl
+	settingsPage.Visible = not showVbl
+	vblMarker.Visible = showVbl
+	settingsMarker.Visible = not showVbl
+	vblButton.TextColor3 = showVbl and colors.text or colors.muted
+	settingsButton.TextColor3 = showVbl and colors.muted or colors.text
+	modeOptions.Visible = false
+end
+
+vblButton.Activated:Connect(function()
+	selectPage("VBL")
+end)
+settingsButton.Activated:Connect(function()
+	selectPage("Settings")
+end)
+selectPage("VBL")
+
+local function setMenuOpen(isOpen)
+	menuOpen = isOpen
+	window.Visible = isOpen
+	modeOptions.Visible = false
+end
+
+UserInputService.InputBegan:Connect(function(input)
+	if menuKeyCapture then
+		if input.UserInputType ~= Enum.UserInputType.Keyboard then
+			return
+		end
+
+		if input.KeyCode == Enum.KeyCode.Escape then
+			menuKeyCapture = false
+			menuBindButton.Text = menuToggleKey.Name
+		elseif input.KeyCode ~= Enum.KeyCode.Unknown then
+			menuToggleKey = input.KeyCode
+			menuKeyCapture = false
+			menuBindButton.Text = menuToggleKey.Name
+		end
+		return
+	end
+
+	if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == menuToggleKey then
+		setMenuOpen(not menuOpen)
+	end
+end)
+
+-- Drag the window by its title bar.
+local dragging = false
+local dragInputPosition
+local windowStartPosition
+header.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = true
+		dragInputPosition = input.Position
+		windowStartPosition = window.Position
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	if not dragging then
+		return
+	end
+	if input.UserInputType == Enum.UserInputType.MouseMovement
+		or input.UserInputType == Enum.UserInputType.Touch then
+		local delta = input.Position - dragInputPosition
+		window.Position = UDim2.new(
+			windowStartPosition.X.Scale,
+			windowStartPosition.X.Offset + delta.X,
+			windowStartPosition.Y.Scale,
+			windowStartPosition.Y.Offset + delta.Y
+		)
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = false
+	end
+end)
