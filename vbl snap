@@ -6,6 +6,7 @@ local player = Players.LocalPlayer
 
 local jumpRotationEnabled = true
 local rotationMode = "Snap"
+local customTurnSpeed = 16
 local menuOpen = true
 local menuToggleKey = Enum.KeyCode.F1
 local menuKeyCapture = false
@@ -106,7 +107,10 @@ local function turnToTarget(root, targetCFrame)
 
 		duration = math.abs(yawDelta) / SNAP_YAW_SPEED
 	else
-		duration = SMOOTH_TURN_TIME
+		-- Custom 16 matches Smooth; higher values turn faster.
+		duration = rotationMode == "Custom"
+			and SMOOTH_TURN_TIME * (31 - customTurnSpeed) / 15
+			or SMOOTH_TURN_TIME
 	end
 
 	if duration < 1 / 120 then
@@ -235,7 +239,7 @@ local screenGui = make("ScreenGui", {
 
 local window = make("Frame", {
 	Name = "Window",
-	Size = UDim2.fromOffset(414, 166),
+	Size = UDim2.fromOffset(414, 190),
 	Position = UDim2.new(0, 8, 0, 8),
 	BackgroundColor3 = colors.background,
 	BorderSizePixel = 0,
@@ -440,6 +444,7 @@ makeCheckbox(
 		jumpRotationEnabled = value
 
 		if not value then
+			cancelSmoothTurn()
 			releaseRotationLock()
 		end
 	end
@@ -497,7 +502,7 @@ make("TextLabel", {
 local modeOptions = make("Frame", {
 	Name = "ModeOptions",
 	Position = UDim2.new(0, 68, 0, 80),
-	Size = UDim2.new(1, -77, 0, 48),
+	Size = UDim2.new(1, -77, 0, 72),
 	BackgroundColor3 = Color3.fromRGB(8, 9, 9),
 	BorderSizePixel = 0,
 	Visible = false,
@@ -509,13 +514,71 @@ make("UIStroke", {
 	Thickness = 1,
 }, modeOptions)
 
+local customSpeedRow = make("Frame", {
+	Name = "CustomSpeedRow",
+	Position = UDim2.new(0, 8, 0, 86),
+	Size = UDim2.new(1, -16, 0, 48),
+	BackgroundTransparency = 1,
+	Visible = rotationMode == "Custom",
+}, vblPage)
+
+make("TextLabel", {
+	Size = UDim2.new(0, 58, 0, 23),
+	BackgroundTransparency = 1,
+	Text = "Speed",
+	TextColor3 = colors.muted,
+	TextSize = 12,
+	Font = Enum.Font.Code,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, customSpeedRow)
+
+local customSpeedInput = make("TextBox", {
+	Name = "CustomSpeedInput",
+	Position = UDim2.new(0, 60, 0, 0),
+	Size = UDim2.new(1, -61, 0, 23),
+	BackgroundColor3 = Color3.fromRGB(7, 8, 8),
+	BorderSizePixel = 0,
+	Text = tostring(customTurnSpeed),
+	PlaceholderText = "1-30",
+	ClearTextOnFocus = false,
+	TextColor3 = colors.text,
+	PlaceholderColor3 = colors.muted,
+	TextSize = 12,
+	Font = Enum.Font.Code,
+}, customSpeedRow)
+
+make("UIStroke", {
+	Color = colors.border,
+	Thickness = 1,
+}, customSpeedInput)
+
+make("TextLabel", {
+	Position = UDim2.new(0, 0, 0, 27),
+	Size = UDim2.new(1, 0, 0, 18),
+	BackgroundTransparency = 1,
+	Text = "1 = slowest | 30 = fastest",
+	TextColor3 = colors.muted,
+	TextSize = 11,
+	Font = Enum.Font.Code,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, customSpeedRow)
+
+customSpeedInput.FocusLost:Connect(function()
+	local value = tonumber(customSpeedInput.Text)
+	if value and value == value then
+		customTurnSpeed = math.clamp(math.round(value), 1, 30)
+	end
+	customSpeedInput.Text = tostring(customTurnSpeed)
+end)
+
 local function setRotationMode(value)
 	rotationMode = value
 	modeText.Text = value
+	customSpeedRow.Visible = value == "Custom"
 	modeOptions.Visible = false
 end
 
-for index, optionName in ipairs({ "Snap", "Smooth" }) do
+for index, optionName in ipairs({ "Snap", "Smooth", "Custom" }) do
 	local optionButton = make("TextButton", {
 		Position = UDim2.new(0, 0, 0, (index - 1) * 24),
 		Size = UDim2.new(1, 0, 0, 24),
@@ -642,7 +705,8 @@ UserInputService.InputBegan:Connect(function(input)
 	end
 
 	if input.UserInputType == Enum.UserInputType.Keyboard
-		and input.KeyCode == menuToggleKey then
+		and input.KeyCode == menuToggleKey
+		and not UserInputService:GetFocusedTextBox() then
 		setMenuOpen(not menuOpen)
 	end
 end)
