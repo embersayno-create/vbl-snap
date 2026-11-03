@@ -1,1 +1,1129 @@
-no
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local GuiService = game:GetService("GuiService")
+local environment = getgenv and getgenv() or _G
+local sessionKey = "VBLJumpRotationSession"
+
+if environment[sessionKey] then
+	environment[sessionKey]()
+end
+
+local alive = true
+local characterVersion = 0
+local connections = {}
+
+local function connect(signal, callback)
+	local connection = signal:Connect(callback)
+	table.insert(connections, connection)
+	return connection
+end
+
+local jumpRotationEnabled = true
+local rotationMode = "Snap"
+local customTurnSpeed = 16
+local menuOpen = true
+local menuToggleKey = Enum.KeyCode.F1
+local menuKeyCapture = false
+
+local JUMP_COOLDOWN = 0.18
+local SNAP_YAW_SPEED = math.rad(2400)
+local SMOOTH_TURN_TIME = 0.32
+
+local humanoid
+local rootPart
+local lastJumpTime = 0
+
+local rotationLockHumanoid
+local rotationLockAutoRotate
+local rotationStateConnection
+local rotationLockId = 0
+local smoothTurnConnection
+
+local function cancelSmoothTurn()
+	if smoothTurnConnection then
+		smoothTurnConnection:Disconnect()
+		smoothTurnConnection = nil
+	end
+end
+
+local function releaseRotationLock()
+	rotationLockId += 1
+
+	if rotationStateConnection then
+		rotationStateConnection:Disconnect()
+		rotationStateConnection = nil
+	end
+
+	local oldHumanoid = rotationLockHumanoid
+	local oldAutoRotate = rotationLockAutoRotate
+
+	rotationLockHumanoid = nil
+	rotationLockAutoRotate = nil
+
+	if oldHumanoid and oldHumanoid.Parent and oldAutoRotate ~= nil then
+		oldHumanoid.AutoRotate = oldAutoRotate
+	end
+end
+
+local function bindCharacter(character)
+	characterVersion += 1
+	local version = characterVersion
+	releaseRotationLock()
+	cancelSmoothTurn()
+	humanoid, rootPart = nil, nil
+	local nextHumanoid = character:WaitForChild("Humanoid")
+	local nextRoot = character:WaitForChild("HumanoidRootPart")
+	if not alive or version ~= characterVersion or player.Character ~= character then return end
+	humanoid, rootPart = nextHumanoid, nextRoot
+	lastJumpTime = -math.huge
+end
+
+connect(player.CharacterAdded, bindCharacter)
+connect(player.CharacterRemoving, function()
+	characterVersion += 1
+	cancelSmoothTurn()
+	releaseRotationLock()
+	humanoid, rootPart = nil, nil
+end)
+
+if player.Character then
+	bindCharacter(player.Character)
+end
+
+local BallTracker = { entries = {} }
+
+function BallTracker:Add(model)
+	if not model:IsA("Model") or not model.Name:match("^CLIENT_BALL_%d+$") or self.entries[model] then return end
+	local entry = { connections = {} }
+	self.entries[model] = entry
+	local function refresh()
+		local part = model:FindFirstChild("Ball.001", true)
+		if not (part and part:IsA("BasePart")) then
+			part = model.PrimaryPart
+			if not part then
+				for _, descendant in ipairs(model:GetDescendants()) do
+					if descendant:IsA("BasePart") then
+						part = descendant
+						break
+					end
+				end
+			end
+		end
+		entry.part = part
+	end
+	table.insert(entry.connections, model.DescendantAdded:Connect(function(descendant)
+		if descendant:IsA("BasePart") then refresh() end
+	end))
+	table.insert(entry.connections, model.DescendantRemoving:Connect(function(descendant)
+		if descendant == entry.part then
+			entry.part = nil
+			task.defer(function()
+				if alive and self.entries[model] == entry then refresh() end
+			end)
+		end
+	end))
+	table.insert(entry.connections, model:GetPropertyChangedSignal("PrimaryPart"):Connect(refresh))
+	refresh()
+end
+
+function BallTracker:Remove(model)
+	local entry = self.entries[model]
+	if not entry then return end
+	for _, connection in ipairs(entry.connections) do connection:Disconnect() end
+	self.entries[model] = nil
+end
+
+function BallTracker:Destroy()
+	for model in pairs(self.entries) do self:Remove(model) end
+end
+
+connect(workspace.ChildAdded, function(model) BallTracker:Add(model) end)
+connect(workspace.ChildRemoved, function(model) BallTracker:Remove(model) end)
+for _, model in ipairs(workspace:GetChildren()) do BallTracker:Add(model) end
+
+local Automation = {
+	receiveEnabled = false, blockEnabled = false,
+	receiveOnce = false, blockOnce = false,
+	nextReceive = 0, nextBlock = 0,
+	mouseHeld = false, blockHeld = false,
+	receiveHalfSize = Vector3.new(4.5, 4.452707290649414, 3.910921096801758),
+}
+local isPointerOverMenu = function() return false end
+
+function Automation:GetInput()
+	if not self.input then self.input = game:GetService("VirtualInputManager") end
+	return self.input
+end
+
+function Automation:ReleaseReceive()
+	if not self.mouseHeld then return end
+	self:GetInput():SendMouseButtonEvent(self.mouseX, self.mouseY, 0, false, game, 0)
+	self.mouseHeld = false
+end
+
+function Automation:ReleaseBlock()
+	if not self.blockHeld then return end
+	self:GetInput():SendKeyEvent(false, Enum.KeyCode.Q, false, game)
+	self.blockHeld = false
+end
+
+function Automation:UpdateUI()
+	if self.updateControls then self.updateControls() end
+end
+
+function Automation:SetReceive(enabled)
+	self.receiveEnabled = enabled
+	if not enabled then self:ReleaseReceive() end
+	self:UpdateUI()
+end
+
+function Automation:SetBlock(enabled)
+	self.blockEnabled = enabled
+	if not enabled then self:ReleaseBlock() end
+	self:UpdateUI()
+end
+
+function Automation:InReceiveHitbox(part, boxFrame)
+	local point = boxFrame:PointToObjectSpace(part.Position)
+	local half = self.receiveHalfSize
+	local radius = math.min(part.Size.X, part.Size.Y, part.Size.Z) * 0.5
+	local dx = math.max(math.abs(point.X) - half.X, 0)
+	local dy = math.max(math.abs(point.Y) - half.Y, 0)
+	local dz = math.max(math.abs(point.Z) - half.Z, 0)
+	return dx * dx + dy * dy + dz * dz <= radius * radius
+end
+
+function Automation:Step(now)
+	if self.mouseHeld and now >= self.mouseReleaseAt then self:ReleaseReceive() end
+	if self.blockHeld and now >= self.blockReleaseAt then self:ReleaseBlock() end
+	if not (self.receiveEnabled or self.blockEnabled) then return end
+	if not humanoid or not rootPart or humanoid.Health <= 0 then return end
+	if menuKeyCapture or UserInputService:GetFocusedTextBox() then return end
+	local airborne = humanoid.FloorMaterial == Enum.Material.Air
+	local receiveReady = self.receiveEnabled and not airborne and not self.mouseHeld
+		and now >= self.nextReceive and not isPointerOverMenu()
+	local blockReady = self.blockEnabled and airborne and not self.blockHeld and now >= self.nextBlock
+	if not (receiveReady or blockReady) then return end
+	local head = receiveReady and humanoid.Parent:FindFirstChild("Head")
+	local receiveFrame = head and CFrame.new(head.Position) * rootPart.CFrame.Rotation
+	for _, entry in pairs(BallTracker.entries) do
+		local part = entry.part
+		if part then
+			if receiveFrame and self:InReceiveHitbox(part, receiveFrame) then
+				local mouse = UserInputService:GetMouseLocation()
+				self.mouseX, self.mouseY = mouse.X, mouse.Y
+				self.mouseHeld = true
+				self.mouseReleaseAt, self.nextReceive = now + 1 / 60, now + 0.10
+				self:GetInput():SendMouseButtonEvent(mouse.X, mouse.Y, 0, true, game, 0)
+				if self.receiveOnce then
+					self.receiveEnabled = false
+					self:UpdateUI()
+				end
+				return
+			elseif blockReady then
+				local offset = part.Position - rootPart.Position
+				if offset.X * offset.X + offset.Z * offset.Z < 8.9 * 8.9 and math.abs(offset.Y) < 14.8 then
+					self.blockHeld = true
+					self.blockReleaseAt, self.nextBlock = now + 1 / 60, now + 0.10
+					self:GetInput():SendKeyEvent(true, Enum.KeyCode.Q, false, game)
+					if self.blockOnce then
+						self.blockEnabled = false
+						self:UpdateUI()
+					end
+					return
+				end
+			end
+		end
+	end
+end
+
+function Automation:Destroy()
+	self:SetReceive(false)
+	self:SetBlock(false)
+end
+
+local function getAimFacingCFrame(root)
+	local camera = workspace.CurrentCamera
+	if not camera then
+		return nil
+	end
+
+	local cameraLook = camera.CFrame.LookVector
+	local flatAim = Vector3.new(cameraLook.X, 0, cameraLook.Z)
+
+	if flatAim.Magnitude < 0.001 then
+		return nil
+	end
+
+	return CFrame.lookAt(root.Position, root.Position + flatAim.Unit)
+end
+
+local function turnToTarget(root, targetCFrame)
+	cancelSmoothTurn()
+
+	local snapMode = rotationMode == "Snap"
+	local startRotation = root.CFrame.Rotation
+	local targetRotation = targetCFrame.Rotation
+	local startedAt = os.clock()
+	local startYaw
+	local yawDelta
+	local duration
+
+	if snapMode then
+		local startLook = root.CFrame.LookVector
+		local targetLook = targetCFrame.LookVector
+
+		startYaw = math.atan2(-startLook.X, -startLook.Z)
+
+		local targetYaw = math.atan2(-targetLook.X, -targetLook.Z)
+
+		yawDelta = math.atan2(
+			math.sin(targetYaw - startYaw),
+			math.cos(targetYaw - startYaw)
+		)
+
+		duration = math.abs(yawDelta) / SNAP_YAW_SPEED
+	else
+		duration = rotationMode == "Custom"
+			and SMOOTH_TURN_TIME * (31 - customTurnSpeed) / 15
+			or SMOOTH_TURN_TIME
+	end
+
+	if duration < 1 / 120 then
+		root.CFrame = CFrame.new(root.Position) * targetRotation
+		return
+	end
+
+	smoothTurnConnection = RunService.Heartbeat:Connect(function()
+		if not root.Parent then
+			cancelSmoothTurn()
+			return
+		end
+
+		local alpha = math.clamp((os.clock() - startedAt) / duration, 0, 1)
+
+		if snapMode then
+			local yaw = startYaw + yawDelta * alpha
+			root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
+		else
+			local easedAlpha = alpha * alpha * (3 - 2 * alpha)
+			root.CFrame = CFrame.new(root.Position) * startRotation:Lerp(
+				targetRotation,
+				easedAlpha
+			)
+		end
+
+		if alpha >= 1 then
+			root.CFrame = CFrame.new(root.Position) * targetRotation
+			cancelSmoothTurn()
+		end
+	end)
+end
+
+local function holdFacingUntilLanding(currentHumanoid)
+	releaseRotationLock()
+
+	rotationLockHumanoid = currentHumanoid
+	rotationLockAutoRotate = currentHumanoid.AutoRotate
+	currentHumanoid.AutoRotate = false
+
+	rotationLockId += 1
+
+	local thisLockId = rotationLockId
+	local state = currentHumanoid:GetState()
+	local hasBeenAirborne = state == Enum.HumanoidStateType.Jumping
+		or state == Enum.HumanoidStateType.Freefall
+
+	rotationStateConnection = currentHumanoid.StateChanged:Connect(function(_, newState)
+		if thisLockId ~= rotationLockId then
+			return
+		end
+
+		if newState == Enum.HumanoidStateType.Jumping
+			or newState == Enum.HumanoidStateType.Freefall then
+			hasBeenAirborne = true
+		elseif hasBeenAirborne
+			and (
+				newState == Enum.HumanoidStateType.Landed
+				or newState == Enum.HumanoidStateType.Running
+			) then
+			releaseRotationLock()
+		end
+	end)
+
+	task.delay(2, function()
+		if thisLockId == rotationLockId then
+			releaseRotationLock()
+		end
+	end)
+end
+
+connect(UserInputService.JumpRequest, function()
+	if not jumpRotationEnabled or not humanoid or not rootPart or UserInputService:GetFocusedTextBox() then
+		return
+	end
+
+	if humanoid.Health <= 0 or not rootPart.Parent then
+		return
+	end
+
+	if os.clock() - lastJumpTime < JUMP_COOLDOWN then
+		return
+	end
+
+	local targetCFrame = getAimFacingCFrame(rootPart)
+	if not targetCFrame then
+		return
+	end
+
+	lastJumpTime = os.clock()
+
+	cancelSmoothTurn()
+	holdFacingUntilLanding(humanoid)
+	turnToTarget(rootPart, targetCFrame)
+end)
+
+local function make(className, properties, parent)
+	local object = Instance.new(className)
+
+	for property, value in pairs(properties) do
+		object[property] = value
+	end
+
+	object.Parent = parent
+	return object
+end
+
+local colors = {
+	background = Color3.fromRGB(7, 9, 9),
+	panel = Color3.fromRGB(10, 11, 12),
+	border = Color3.fromRGB(34, 39, 38),
+	text = Color3.fromRGB(203, 208, 206),
+	muted = Color3.fromRGB(112, 119, 116),
+	green = Color3.fromRGB(0, 205, 145),
+}
+
+local playerGui = player:WaitForChild("PlayerGui")
+
+local screenGui = make("ScreenGui", {
+	Name = "JumpRotationMenu",
+	ResetOnSpawn = false,
+	IgnoreGuiInset = false,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	DisplayOrder = 20,
+}, playerGui)
+
+local window = make("Frame", {
+	Name = "Window",
+	Size = UDim2.fromOffset(640, 430),
+	Position = UDim2.new(0, 8, 0, 8),
+	BackgroundColor3 = colors.background,
+	BorderSizePixel = 0,
+	Visible = true,
+}, screenGui)
+
+make("UIStroke", {
+	Color = colors.border,
+	Thickness = 1,
+}, window)
+
+make("UICorner", {
+	CornerRadius = UDim.new(0, 3),
+}, window)
+
+make("Frame", {
+	Name = "GreenTopLine",
+	Size = UDim2.new(1, 0, 0, 2),
+	Position = UDim2.new(0, 0, 0, 0),
+	BackgroundColor3 = colors.green,
+	BorderSizePixel = 0,
+	ZIndex = 3,
+}, window)
+
+local header = make("Frame", {
+	Name = "Header",
+	Position = UDim2.new(0, 0, 0, 2),
+	Size = UDim2.new(1, 0, 0, 34),
+	BackgroundColor3 = Color3.fromRGB(9, 11, 11),
+	BorderSizePixel = 0,
+	Active = true,
+}, window)
+
+make("TextLabel", {
+	Name = "Title",
+	Position = UDim2.new(0, 8, 0, 0),
+	Size = UDim2.new(0, 164, 1, 0),
+	BackgroundTransparency = 1,
+	Text = "Volleyball Legends",
+	TextColor3 = colors.text,
+	TextSize = 15,
+	Font = Enum.Font.Code,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	ZIndex = 4,
+}, header)
+
+make("TextLabel", {
+	Name = "Heart",
+	Position = UDim2.new(0, 176, 0, 0),
+	Size = UDim2.new(0, 16, 1, 0),
+	BackgroundTransparency = 1,
+	Text = "♥",
+	TextColor3 = colors.green,
+	TextSize = 15,
+	Font = Enum.Font.Code,
+	ZIndex = 4,
+}, header)
+
+local sidebar = make("Frame", {
+	Name = "Sidebar",
+	Position = UDim2.new(0, 0, 0, 36),
+	Size = UDim2.new(0, 118, 1, -36),
+	BackgroundColor3 = colors.background,
+	BorderSizePixel = 0,
+}, window)
+
+local card = make("Frame", {
+	Name = "ContentPanel",
+	Position = UDim2.new(0, 126, 0, 48),
+	Size = UDim2.new(1, -142, 1, -64),
+	BackgroundColor3 = colors.panel,
+	BorderSizePixel = 0,
+	ClipsDescendants = false,
+}, window)
+
+make("UIStroke", {
+	Color = Color3.fromRGB(24, 28, 27),
+	Thickness = 1,
+}, card)
+
+local function makeNavButton(label, y)
+	local button = make("TextButton", {
+		Size = UDim2.new(1, -8, 0, 34),
+		Position = UDim2.new(0, 8, 0, y),
+		BackgroundColor3 = colors.background,
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Text = label,
+		TextColor3 = colors.muted,
+		TextSize = 14,
+		Font = Enum.Font.Code,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		AutoButtonColor = false,
+	}, sidebar)
+
+	local marker = make("Frame", {
+		Size = UDim2.new(0, 2, 1, 0),
+		Position = UDim2.new(0, 0, 0, 0),
+		BackgroundColor3 = colors.green,
+		BorderSizePixel = 0,
+		Visible = false,
+	}, button)
+
+	return button, marker
+end
+
+local vblButton, vblMarker = makeNavButton("VBL", 16)
+local automationButton, automationMarker = makeNavButton("Auto", 60)
+local settingsButton, settingsMarker = makeNavButton("Settings", 104)
+
+local vblPage = make("Frame", {
+	Name = "VBLPage",
+	Size = UDim2.fromScale(1, 1),
+	BackgroundTransparency = 1,
+	Visible = true,
+}, card)
+
+local automationPage = make("Frame", {
+	Name = "AutomationPage",
+	Size = UDim2.fromScale(1, 1),
+	BackgroundTransparency = 1,
+	Visible = false,
+}, card)
+
+make("TextLabel", {
+	Name = "SectionTitle",
+	Position = UDim2.new(0, 9, 0, 6),
+	Size = UDim2.new(1, -18, 0, 21),
+	BackgroundTransparency = 1,
+	Text = "Automation",
+	TextColor3 = colors.text,
+	TextSize = 15,
+	Font = Enum.Font.Code,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, automationPage)
+
+local settingsPage = make("Frame", {
+	Name = "SettingsPage",
+	Size = UDim2.fromScale(1, 1),
+	BackgroundTransparency = 1,
+	Visible = false,
+}, card)
+
+make("TextLabel", {
+	Name = "SectionTitle",
+	Position = UDim2.new(0, 9, 0, 6),
+	Size = UDim2.new(1, -18, 0, 21),
+	BackgroundTransparency = 1,
+	Text = "Jump Rotation",
+	TextColor3 = colors.text,
+	TextSize = 15,
+	Font = Enum.Font.Code,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, vblPage)
+
+local function makeCheckbox(parent, y, label, getValue, onChanged)
+	local row = make("TextButton", {
+		Size = UDim2.new(1, -16, 0, 28),
+		Position = UDim2.new(0, 8, 0, y),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Text = "",
+		AutoButtonColor = false,
+	}, parent)
+
+	local box = make("Frame", {
+		Size = UDim2.fromOffset(18, 18),
+		Position = UDim2.new(0, 0, 0.5, -9),
+		BackgroundColor3 = colors.background,
+		BorderSizePixel = 0,
+	}, row)
+
+	local boxStroke = make("UIStroke", {
+		Color = colors.border,
+		Thickness = 1,
+	}, box)
+
+	local checkMark = make("TextLabel", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Text = "✓",
+		TextColor3 = colors.green,
+		TextSize = 14,
+		Font = Enum.Font.Code,
+		Visible = false,
+	}, box)
+
+	local labelObject = make("TextLabel", {
+		Position = UDim2.new(0, 29, 0, 0),
+		Size = UDim2.new(1, -29, 1, 0),
+		BackgroundTransparency = 1,
+		Text = label,
+		TextColor3 = colors.muted,
+		TextSize = 14,
+		Font = Enum.Font.Code,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, row)
+
+	local function refresh()
+		local checked = getValue()
+		checkMark.Visible = checked
+		boxStroke.Color = checked and colors.green or colors.border
+		labelObject.TextColor3 = checked and colors.text or colors.muted
+	end
+
+	connect(row.Activated, function()
+		onChanged(not getValue())
+		refresh()
+	end)
+
+	refresh()
+	return { Refresh = refresh, frame = row }
+end
+
+local Bindings = {
+	menu = { key = menuToggleKey, active = true },
+	receive = { key = Enum.KeyCode.R, active = true },
+	block = { key = Enum.KeyCode.B, active = true },
+	rotation = { key = Enum.KeyCode.X, active = true },
+}
+local keyCapture
+local rotationToggle
+
+local function cancelKeyCapture()
+	local capture = keyCapture
+	keyCapture, menuKeyCapture = nil, false
+	if capture then capture.binding.render() end
+end
+
+local function beginKeyCapture(binding, control)
+	cancelKeyCapture()
+	keyCapture = { binding = binding, control = control }
+	menuKeyCapture = true
+	control.Text = "Press key"
+end
+
+local function keyInUse(key, except)
+	for _, binding in pairs(Bindings) do
+		if binding ~= except and binding.active and binding.key == key then return true end
+	end
+	return false
+end
+
+local function makeKeybindRow(parent, y, text, binding)
+	local row = make("Frame", {
+		Position = UDim2.fromOffset(8, y), Size = UDim2.new(1, -16, 0, 32),
+		BackgroundTransparency = 1,
+	}, parent)
+	make("TextLabel", {
+		Size = UDim2.new(1, -278, 1, 0), BackgroundTransparency = 1,
+		Text = text, Font = Enum.Font.Code, TextSize = 14, TextColor3 = colors.muted,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, row)
+	local function control(text, x, width)
+		local result = make("TextButton", {
+			Position = UDim2.new(1, x, 0, 0), Size = UDim2.fromOffset(width, 30),
+			BackgroundColor3 = colors.background, BorderSizePixel = 0,
+			Text = text, Font = Enum.Font.Code, TextSize = 14, TextColor3 = colors.text,
+			AutoButtonColor = false,
+		}, row)
+		make("UIStroke", { Color = colors.border, Thickness = 1 }, result)
+		return result
+	end
+	local keyButton = control("", -270, 84)
+	local unbind = control("Unbind", -176, 78)
+	local rebind = control("Rebind", -88, 78)
+	binding.render = function()
+		keyButton.Text = binding.key.Name
+		keyButton.TextColor3 = binding.active and colors.green or colors.muted
+		unbind.TextColor3 = binding.active and colors.text or colors.muted
+		rebind.TextColor3 = binding.active and colors.muted or colors.green
+	end
+	connect(keyButton.Activated, function() beginKeyCapture(binding, keyButton) end)
+	connect(unbind.Activated, function()
+		cancelKeyCapture()
+		binding.active = false
+		binding.render()
+	end)
+	connect(rebind.Activated, function()
+		cancelKeyCapture()
+		if keyInUse(binding.key, binding) then
+			beginKeyCapture(binding, keyButton)
+		else
+			binding.active = true
+			binding.render()
+		end
+	end)
+	binding.render()
+	return row
+end
+
+local receiveToggle = makeCheckbox(automationPage, 44, "Auto Receive", function()
+	return Automation.receiveEnabled
+end, function(value)
+	Automation:SetReceive(value)
+end)
+
+makeCheckbox(automationPage, 78, "One Time (Receive)", function()
+	return Automation.receiveOnce
+end, function(value)
+	Automation.receiveOnce = value
+end)
+
+makeKeybindRow(automationPage, 114, "Receive key", Bindings.receive)
+
+local blockToggle = makeCheckbox(automationPage, 176, "Auto Block", function()
+	return Automation.blockEnabled
+end, function(value)
+	Automation:SetBlock(value)
+end)
+
+makeCheckbox(automationPage, 210, "One Time (Block)", function()
+	return Automation.blockOnce
+end, function(value)
+	Automation.blockOnce = value
+end)
+
+makeKeybindRow(automationPage, 246, "Block key", Bindings.block)
+
+local automationStatus = make("TextLabel", {
+	Position = UDim2.fromOffset(8, 306), Size = UDim2.new(1, -16, 0, 24),
+	BackgroundTransparency = 1, Text = "", TextSize = 14,
+	Font = Enum.Font.Code, TextColor3 = colors.muted,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, automationPage)
+
+Automation.updateControls = function()
+	receiveToggle.Refresh()
+	blockToggle.Refresh()
+	automationStatus.Text = "Receive: " .. (Automation.receiveEnabled and "ON" or "OFF")
+		.. "    Block: " .. (Automation.blockEnabled and "ON" or "OFF")
+end
+Automation:UpdateUI()
+
+Bindings.receive.callback = function() Automation:SetReceive(not Automation.receiveEnabled) end
+Bindings.block.callback = function() Automation:SetBlock(not Automation.blockEnabled) end
+
+rotationToggle = makeCheckbox(
+	vblPage,
+	44,
+	"Enabled",
+	function()
+		return jumpRotationEnabled
+	end,
+	function(value)
+		jumpRotationEnabled = value
+
+		if not value then
+			cancelSmoothTurn()
+			releaseRotationLock()
+		end
+	end
+)
+
+make("TextLabel", {
+	Position = UDim2.new(0, 8, 0, 88),
+	Size = UDim2.new(0, 58, 0, 22),
+	BackgroundTransparency = 1,
+	Text = "Mode",
+	TextColor3 = colors.muted,
+	TextSize = 14,
+	Font = Enum.Font.Code,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, vblPage)
+
+local modeButton = make("TextButton", {
+	Position = UDim2.new(0, 84, 0, 84),
+	Size = UDim2.new(1, -93, 0, 30),
+	BackgroundColor3 = Color3.fromRGB(7, 8, 8),
+	BorderSizePixel = 0,
+	Text = "",
+	AutoButtonColor = false,
+	ZIndex = 4,
+}, vblPage)
+
+make("UIStroke", {
+	Color = colors.border,
+	Thickness = 1,
+}, modeButton)
+
+local modeText = make("TextLabel", {
+	Position = UDim2.new(0, 8, 0, 0),
+	Size = UDim2.new(1, -28, 1, 0),
+	BackgroundTransparency = 1,
+	Text = rotationMode,
+	TextColor3 = colors.text,
+	TextSize = 14,
+	Font = Enum.Font.Code,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	ZIndex = 5,
+}, modeButton)
+
+make("TextLabel", {
+	Position = UDim2.new(1, -22, 0, 0),
+	Size = UDim2.new(0, 18, 1, 0),
+	BackgroundTransparency = 1,
+	Text = "▼",
+	TextColor3 = colors.muted,
+	TextSize = 11,
+	Font = Enum.Font.Code,
+	ZIndex = 5,
+}, modeButton)
+
+local modeOptions = make("Frame", {
+	Name = "ModeOptions",
+	Position = UDim2.new(0, 84, 0, 116),
+	Size = UDim2.new(1, -93, 0, 90),
+	BackgroundColor3 = Color3.fromRGB(8, 9, 9),
+	BorderSizePixel = 0,
+	Visible = false,
+	ZIndex = 20,
+}, vblPage)
+
+make("UIStroke", {
+	Color = colors.border,
+	Thickness = 1,
+}, modeOptions)
+
+local customSpeedRow = make("Frame", {
+	Name = "CustomSpeedRow",
+	Position = UDim2.new(0, 8, 0, 126),
+	Size = UDim2.new(1, -16, 0, 62),
+	BackgroundTransparency = 1,
+	Visible = rotationMode == "Custom",
+}, vblPage)
+
+make("TextLabel", {
+	Size = UDim2.new(0, 58, 0, 23),
+	BackgroundTransparency = 1,
+	Text = "Speed",
+	TextColor3 = colors.muted,
+	TextSize = 14,
+	Font = Enum.Font.Code,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, customSpeedRow)
+
+local customSpeedInput = make("TextBox", {
+	Name = "CustomSpeedInput",
+	Position = UDim2.new(0, 76, 0, 0),
+	Size = UDim2.new(1, -77, 0, 30),
+	BackgroundColor3 = Color3.fromRGB(7, 8, 8),
+	BorderSizePixel = 0,
+	Text = tostring(customTurnSpeed),
+	PlaceholderText = "1-30",
+	ClearTextOnFocus = false,
+	TextColor3 = colors.text,
+	PlaceholderColor3 = colors.muted,
+	TextSize = 14,
+	Font = Enum.Font.Code,
+}, customSpeedRow)
+
+make("UIStroke", {
+	Color = colors.border,
+	Thickness = 1,
+}, customSpeedInput)
+
+make("TextLabel", {
+	Position = UDim2.new(0, 0, 0, 36),
+	Size = UDim2.new(1, 0, 0, 18),
+	BackgroundTransparency = 1,
+	Text = "1 = slowest | 30 = fastest",
+	TextColor3 = colors.muted,
+	TextSize = 12,
+	Font = Enum.Font.Code,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, customSpeedRow)
+
+connect(customSpeedInput.FocusLost, function()
+	local value = tonumber(customSpeedInput.Text)
+	if value and value == value then
+		customTurnSpeed = math.clamp(math.round(value), 1, 30)
+	end
+	customSpeedInput.Text = tostring(customTurnSpeed)
+end)
+
+local function setRotationMode(value)
+	rotationMode = value
+	modeText.Text = value
+	customSpeedRow.Visible = value == "Custom"
+	modeOptions.Visible = false
+end
+
+for index, optionName in ipairs({ "Snap", "Smooth", "Custom" }) do
+	local optionButton = make("TextButton", {
+		Position = UDim2.new(0, 0, 0, (index - 1) * 30),
+		Size = UDim2.new(1, 0, 0, 30),
+		BackgroundColor3 = colors.background,
+		BorderSizePixel = 0,
+		Text = optionName,
+		TextColor3 = colors.text,
+		TextSize = 14,
+		Font = Enum.Font.Code,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		AutoButtonColor = false,
+		ZIndex = 21,
+	}, modeOptions)
+
+	connect(optionButton.Activated, function()
+		setRotationMode(optionName)
+	end)
+end
+
+connect(modeButton.Activated, function()
+	modeOptions.Visible = not modeOptions.Visible
+end)
+
+Bindings.rotation.callback = function()
+	jumpRotationEnabled = not jumpRotationEnabled
+	if not jumpRotationEnabled then
+		cancelSmoothTurn()
+		releaseRotationLock()
+	end
+	rotationToggle.Refresh()
+end
+makeKeybindRow(vblPage, 220, "Rotation key", Bindings.rotation)
+
+make("TextLabel", {
+	Position = UDim2.new(0, 9, 0, 8),
+	Size = UDim2.new(1, -18, 0, 21),
+	BackgroundTransparency = 1,
+	Text = "Settings",
+	TextColor3 = colors.text,
+	TextSize = 15,
+	Font = Enum.Font.Code,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, settingsPage)
+
+make("TextLabel", {
+	Position = UDim2.new(0, 9, 0, 48),
+	Size = UDim2.new(0, 140, 0, 30),
+	BackgroundTransparency = 1,
+	Text = "Menu toggle",
+	TextColor3 = colors.muted,
+	TextSize = 14,
+	Font = Enum.Font.Code,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, settingsPage)
+
+local menuBindButton = make("TextButton", {
+	Position = UDim2.new(1, -110, 0, 46),
+	Size = UDim2.fromOffset(96, 30),
+	BackgroundColor3 = Color3.fromRGB(7, 8, 8),
+	BorderSizePixel = 0,
+	Text = menuToggleKey.Name,
+	TextColor3 = colors.text,
+	TextSize = 14,
+	Font = Enum.Font.Code,
+	AutoButtonColor = false,
+}, settingsPage)
+
+make("UIStroke", {
+	Color = colors.border,
+	Thickness = 1,
+}, menuBindButton)
+
+Bindings.menu.render = function()
+	menuToggleKey = Bindings.menu.key
+	menuBindButton.Text = menuToggleKey.Name
+end
+connect(menuBindButton.Activated, function()
+	beginKeyCapture(Bindings.menu, menuBindButton)
+end)
+
+make("TextLabel", {
+	Position = UDim2.new(0, 9, 0, 92),
+	Size = UDim2.new(1, -18, 0, 44),
+	BackgroundTransparency = 1,
+	Text = "Click the key box, then press a key.\nEscape cancels the change.",
+	TextColor3 = colors.muted,
+	TextSize = 14,
+	Font = Enum.Font.Code,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	TextYAlignment = Enum.TextYAlignment.Top,
+}, settingsPage)
+
+local function selectPage(pageName)
+	cancelKeyCapture()
+	local showVbl = pageName == "VBL"
+	local showAuto = pageName == "Auto"
+	local showSettings = pageName == "Settings"
+	vblPage.Visible, vblMarker.Visible = showVbl, showVbl
+	automationPage.Visible, automationMarker.Visible = showAuto, showAuto
+	settingsPage.Visible, settingsMarker.Visible = showSettings, showSettings
+	vblButton.TextColor3 = showVbl and colors.text or colors.muted
+	automationButton.TextColor3 = showAuto and colors.text or colors.muted
+	settingsButton.TextColor3 = showSettings and colors.text or colors.muted
+	modeOptions.Visible = false
+end
+
+connect(vblButton.Activated, function()
+	selectPage("VBL")
+end)
+
+connect(automationButton.Activated, function()
+	selectPage("Auto")
+end)
+
+connect(settingsButton.Activated, function()
+	selectPage("Settings")
+end)
+
+selectPage("VBL")
+
+local function setMenuOpen(isOpen)
+	cancelKeyCapture()
+	menuOpen = isOpen
+	window.Visible = isOpen
+	modeOptions.Visible = false
+end
+
+connect(UserInputService.InputBegan, function(input, processed)
+	if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+	if Automation.blockHeld and input.KeyCode == Enum.KeyCode.Q then return end
+	if keyCapture then
+		if input.KeyCode == Enum.KeyCode.Escape then
+			cancelKeyCapture()
+		elseif input.KeyCode ~= Enum.KeyCode.Unknown then
+			local capture = keyCapture
+			if keyInUse(input.KeyCode, capture.binding) then
+				capture.control.Text = "Key used"
+				return
+			end
+			capture.binding.key = input.KeyCode
+			capture.binding.active = true
+			cancelKeyCapture()
+		end
+		return
+	end
+	if UserInputService:GetFocusedTextBox() then return end
+	if input.KeyCode == menuToggleKey then
+		setMenuOpen(not menuOpen)
+		return
+	end
+	if processed then return end
+	for _, binding in pairs(Bindings) do
+		if binding.active and input.KeyCode == binding.key and binding.callback then
+			binding.callback()
+			return
+		end
+	end
+end)
+
+local dragging = false
+local dragInputPosition
+local windowStartPosition
+
+connect(header.InputBegan, function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = true
+		dragInputPosition = input.Position
+		windowStartPosition = window.Position
+	end
+end)
+
+connect(UserInputService.InputChanged, function(input)
+	if not dragging then
+		return
+	end
+
+	if input.UserInputType == Enum.UserInputType.MouseMovement
+		or input.UserInputType == Enum.UserInputType.Touch then
+		local delta = input.Position - dragInputPosition
+
+		window.Position = UDim2.new(
+			windowStartPosition.X.Scale,
+			windowStartPosition.X.Offset + delta.X,
+			windowStartPosition.Y.Scale,
+			windowStartPosition.Y.Offset + delta.Y
+		)
+	end
+end)
+
+connect(UserInputService.InputEnded, function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = false
+	end
+end)
+isPointerOverMenu = function()
+	if not window.Visible then return false end
+	local mouse = UserInputService:GetMouseLocation()
+	local inset = GuiService:GetGuiInset()
+	local position, size = window.AbsolutePosition, window.AbsoluteSize
+	local x, y = position.X + inset.X, position.Y + inset.Y
+	return mouse.X >= x and mouse.X <= x + size.X and mouse.Y >= y and mouse.Y <= y + size.Y
+end
+
+connect(RunService.Heartbeat, function()
+	Automation:Step(os.clock())
+end)
+
+local function destroy()
+	if not alive then return end
+	alive = false
+	characterVersion += 1
+	for _, connection in ipairs(connections) do connection:Disconnect() end
+	table.clear(connections)
+	cancelSmoothTurn()
+	releaseRotationLock()
+	Automation:Destroy()
+	BallTracker:Destroy()
+	screenGui:Destroy()
+	if environment[sessionKey] == destroy then environment[sessionKey] = nil end
+end
+
+connect(screenGui.Destroying, destroy)
+environment[sessionKey] = destroy
