@@ -1,6 +1,7 @@
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
 
 local player = Players.LocalPlayer
 local GuiService = game:GetService("GuiService")
@@ -21,11 +22,88 @@ local function connect(signal, callback)
 	return connection
 end
 
-local jumpRotationEnabled = true
-local rotationMode = "Snap"
-local customTurnSpeed = 16
+local ConfigDefaults = {
+	JumpRotationEnabled = true, RotationMode = "Snap", CustomTurnSpeed = 16,
+	AutoReceiveEnabled = false, AutoBlockEnabled = false,
+	OneTimeReceive = false, OneTimeBlock = false,
+	MenuKey = "F1", ReceiveKey = "R", BlockKey = "B", RotationKey = "X",
+	ReceiveKeyActive = true, BlockKeyActive = true, RotationKeyActive = true,
+}
+
+local Config = {
+	path = "VBLJumpRotation_" .. player.UserId .. ".json",
+	cacheKey = "VBLJumpRotationConfig_" .. player.UserId,
+	values = table.clone(ConfigDefaults), pending = nil,
+}
+local savedConfig = environment[Config.cacheKey]
+
+if readfile and isfile then
+	local ok, result = pcall(function()
+		if isfile(Config.path) then return HttpService:JSONDecode(readfile(Config.path)) end
+	end)
+	if ok then
+		if result ~= nil then savedConfig = result end
+	else
+		warn("[VBL] Could not load config: " .. tostring(result))
+	end
+end
+
+if type(savedConfig) == "table" then
+	for key, default in pairs(ConfigDefaults) do
+		local value = savedConfig[key]
+		if type(value) == type(default) then Config.values[key] = value end
+	end
+end
+
+local KeyCodes = {}
+for _, code in ipairs(Enum.KeyCode:GetEnumItems()) do KeyCodes[code.Name] = code end
+for key, default in pairs(ConfigDefaults) do
+	if key:match("Key$") and (not KeyCodes[Config.values[key]] or Config.values[key] == "Unknown" or Config.values[key] == "Escape") then
+		Config.values[key] = default
+	end
+end
+if Config.values.RotationMode ~= "Snap" and Config.values.RotationMode ~= "Smooth" and Config.values.RotationMode ~= "Custom" then
+	Config.values.RotationMode = "Snap"
+end
+local savedSpeed = Config.values.CustomTurnSpeed
+Config.values.CustomTurnSpeed = savedSpeed == savedSpeed and math.clamp(math.round(savedSpeed), 1, 30) or 16
+
+function Config:Flush()
+	if self.pending then
+		task.cancel(self.pending)
+		self.pending = nil
+	end
+	self.values = self.capture()
+	environment[self.cacheKey] = self.values
+	if not writefile then
+		if not self.writeWarning then
+			self.writeWarning = true
+			warn("[VBL] No writefile support; config will only be kept for this session.")
+		end
+		return
+	end
+	local ok, message = pcall(function()
+		writefile(self.path, HttpService:JSONEncode(self.values))
+	end)
+	if not ok and not self.writeWarning then
+		self.writeWarning = true
+		warn("[VBL] Could not save config: " .. tostring(message))
+	end
+end
+
+function Config:Queue()
+	if not alive or self.pending then return end
+	self.pending = task.delay(0.25, function()
+		self.pending = nil
+		self:Flush()
+	end)
+end
+
+local jumpRotationEnabled = Config.values.JumpRotationEnabled
+local rotationMode = Config.values.RotationMode
+local customTurnSpeed = Config.values.CustomTurnSpeed
 local menuOpen = true
-local menuToggleKey = Enum.KeyCode.F1
+local menuToggleKey = KeyCodes[Config.values.MenuKey]
 local menuKeyCapture = false
 
 local JUMP_COOLDOWN = 0.18
@@ -145,8 +223,8 @@ connect(workspace.ChildRemoved, function(model) BallTracker:Remove(model) end)
 for _, model in ipairs(workspace:GetChildren()) do BallTracker:Add(model) end
 
 local Automation = {
-	receiveEnabled = false, blockEnabled = false,
-	receiveOnce = false, blockOnce = false,
+	receiveEnabled = Config.values.AutoReceiveEnabled, blockEnabled = Config.values.AutoBlockEnabled,
+	receiveOnce = Config.values.OneTimeReceive, blockOnce = Config.values.OneTimeBlock,
 	nextReceive = 0, nextBlock = 0,
 	mouseHeld = false, blockHeld = false,
 	receiveHalfSize = Vector3.new(4.5, 4.452707290649414, 3.910921096801758),
@@ -178,12 +256,14 @@ function Automation:SetReceive(enabled)
 	self.receiveEnabled = enabled
 	if not enabled then self:ReleaseReceive() end
 	self:UpdateUI()
+	Config:Queue()
 end
 
 function Automation:SetBlock(enabled)
 	self.blockEnabled = enabled
 	if not enabled then self:ReleaseBlock() end
 	self:UpdateUI()
+	Config:Queue()
 end
 
 function Automation:InReceiveHitbox(part, boxFrame)
@@ -221,6 +301,7 @@ function Automation:Step(now)
 				if self.receiveOnce then
 					self.receiveEnabled = false
 					self:UpdateUI()
+					Config:Queue()
 				end
 				return
 			elseif blockReady then
@@ -232,6 +313,7 @@ function Automation:Step(now)
 					if self.blockOnce then
 						self.blockEnabled = false
 						self:UpdateUI()
+						Config:Queue()
 					end
 					return
 				end
@@ -635,9 +717,9 @@ end
 
 local Bindings = {
 	menu = { key = menuToggleKey, active = true },
-	receive = { key = Enum.KeyCode.R, active = true },
-	block = { key = Enum.KeyCode.B, active = true },
-	rotation = { key = Enum.KeyCode.X, active = true },
+	receive = { key = KeyCodes[Config.values.ReceiveKey], active = Config.values.ReceiveKeyActive },
+	block = { key = KeyCodes[Config.values.BlockKey], active = Config.values.BlockKeyActive },
+	rotation = { key = KeyCodes[Config.values.RotationKey], active = Config.values.RotationKeyActive },
 }
 local keyCapture
 local rotationToggle
@@ -696,6 +778,7 @@ local function makeKeybindRow(parent, y, text, binding)
 		cancelKeyCapture()
 		binding.active = false
 		binding.render()
+		Config:Queue()
 	end)
 	connect(rebind.Activated, function()
 		cancelKeyCapture()
@@ -704,6 +787,7 @@ local function makeKeybindRow(parent, y, text, binding)
 		else
 			binding.active = true
 			binding.render()
+			Config:Queue()
 		end
 	end)
 	binding.render()
@@ -720,6 +804,7 @@ makeCheckbox(automationPage, 78, "One Time (Receive)", function()
 	return Automation.receiveOnce
 end, function(value)
 	Automation.receiveOnce = value
+	Config:Queue()
 end)
 
 makeKeybindRow(automationPage, 114, "Receive key", Bindings.receive)
@@ -734,6 +819,7 @@ makeCheckbox(automationPage, 210, "One Time (Block)", function()
 	return Automation.blockOnce
 end, function(value)
 	Automation.blockOnce = value
+	Config:Queue()
 end)
 
 makeKeybindRow(automationPage, 246, "Block key", Bindings.block)
@@ -765,6 +851,7 @@ rotationToggle = makeCheckbox(
 	end,
 	function(value)
 		jumpRotationEnabled = value
+		Config:Queue()
 
 		if not value then
 			cancelSmoothTurn()
@@ -892,6 +979,7 @@ connect(customSpeedInput.FocusLost, function()
 		customTurnSpeed = math.clamp(math.round(value), 1, 30)
 	end
 	customSpeedInput.Text = tostring(customTurnSpeed)
+	Config:Queue()
 end)
 
 local function setRotationMode(value)
@@ -899,6 +987,7 @@ local function setRotationMode(value)
 	modeText.Text = value
 	customSpeedRow.Visible = value == "Custom"
 	modeOptions.Visible = false
+	Config:Queue()
 end
 
 for index, optionName in ipairs({ "Snap", "Smooth", "Custom" }) do
@@ -932,6 +1021,7 @@ Bindings.rotation.callback = function()
 		releaseRotationLock()
 	end
 	rotationToggle.Refresh()
+	Config:Queue()
 end
 makeKeybindRow(vblPage, 220, "Rotation key", Bindings.rotation)
 
@@ -1044,6 +1134,7 @@ connect(UserInputService.InputBegan, function(input, processed)
 			capture.binding.key = input.KeyCode
 			capture.binding.active = true
 			cancelKeyCapture()
+			Config:Queue()
 		end
 		return
 	end
@@ -1113,6 +1204,7 @@ end)
 
 local function destroy()
 	if not alive then return end
+	Config:Flush()
 	alive = false
 	characterVersion += 1
 	for _, connection in ipairs(connections) do connection:Disconnect() end
@@ -1125,5 +1217,19 @@ local function destroy()
 	if environment[sessionKey] == destroy then environment[sessionKey] = nil end
 end
 
+Config.capture = function()
+	return {
+		JumpRotationEnabled = jumpRotationEnabled,
+		RotationMode = rotationMode, CustomTurnSpeed = customTurnSpeed,
+		AutoReceiveEnabled = Automation.receiveEnabled, AutoBlockEnabled = Automation.blockEnabled,
+		OneTimeReceive = Automation.receiveOnce, OneTimeBlock = Automation.blockOnce,
+		MenuKey = Bindings.menu.key.Name,
+		ReceiveKey = Bindings.receive.key.Name, ReceiveKeyActive = Bindings.receive.active,
+		BlockKey = Bindings.block.key.Name, BlockKeyActive = Bindings.block.active,
+		RotationKey = Bindings.rotation.key.Name, RotationKeyActive = Bindings.rotation.active,
+	}
+end
+
 connect(screenGui.Destroying, destroy)
 environment[sessionKey] = destroy
+Config:Flush()
