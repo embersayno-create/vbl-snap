@@ -26,6 +26,7 @@ local ConfigDefaults = {
 	JumpRotationEnabled = true, RotationMode = "Snap", CustomTurnSpeed = 16,
 	AutoReceiveEnabled = false, AutoBlockEnabled = false,
 	OneTimeReceive = false, OneTimeBlock = false,
+	ReceiveDelayMs = 50,
 	MenuKey = "F1", ReceiveKey = "R", BlockKey = "B", RotationKey = "X",
 	ReceiveKeyActive = true, BlockKeyActive = true, RotationKeyActive = true,
 }
@@ -67,6 +68,8 @@ if Config.values.RotationMode ~= "Snap" and Config.values.RotationMode ~= "Smoot
 end
 local savedSpeed = Config.values.CustomTurnSpeed
 Config.values.CustomTurnSpeed = savedSpeed == savedSpeed and math.clamp(math.round(savedSpeed), 1, 30) or 16
+local savedReceiveDelay = Config.values.ReceiveDelayMs
+Config.values.ReceiveDelayMs = savedReceiveDelay == savedReceiveDelay and math.clamp(math.round(savedReceiveDelay), 25, 250) or 50
 
 function Config:Flush()
 	if self.pending then
@@ -226,6 +229,7 @@ local Automation = {
 	receiveEnabled = Config.values.AutoReceiveEnabled, blockEnabled = Config.values.AutoBlockEnabled,
 	receiveOnce = Config.values.OneTimeReceive, blockOnce = Config.values.OneTimeBlock,
 	nextReceive = 0, nextBlock = 0,
+	receiveDelayMs = Config.values.ReceiveDelayMs,
 	mouseHeld = false, blockHeld = false,
 	receiveHalfSize = Vector3.new(4.5, 4.452707290649414, 3.910921096801758),
 }
@@ -296,7 +300,7 @@ function Automation:Step(now)
 				local mouse = UserInputService:GetMouseLocation()
 				self.mouseX, self.mouseY = mouse.X, mouse.Y
 				self.mouseHeld = true
-				self.mouseReleaseAt, self.nextReceive = now + 1 / 60, now + 0.10
+				self.mouseReleaseAt, self.nextReceive = now + 1 / 60, now + self.receiveDelayMs / 1000
 				self:GetInput():SendMouseButtonEvent(mouse.X, mouse.Y, 0, true, game, 0)
 				if self.receiveOnce then
 					self.receiveEnabled = false
@@ -839,6 +843,25 @@ Automation.updateControls = function()
 end
 Automation:UpdateUI()
 
+make("TextLabel", {
+	Position = UDim2.fromOffset(8, 334), Size = UDim2.new(1, -124, 0, 30),
+	BackgroundTransparency = 1, Text = "Receive delay (ms)", TextColor3 = colors.muted,
+	Font = Enum.Font.Code, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left,
+}, automationPage)
+local receiveDelayInput = make("TextBox", {
+	Position = UDim2.new(1, -110, 0, 334), Size = UDim2.fromOffset(96, 30),
+	BackgroundColor3 = colors.background, BorderSizePixel = 0,
+	Text = tostring(Automation.receiveDelayMs), TextColor3 = colors.green,
+	Font = Enum.Font.Code, TextSize = 14, ClearTextOnFocus = false,
+}, automationPage)
+make("UIStroke", { Color = colors.border, Thickness = 1 }, receiveDelayInput)
+connect(receiveDelayInput.FocusLost, function()
+	local value = tonumber(receiveDelayInput.Text)
+	if value and value == value then Automation.receiveDelayMs = math.clamp(math.round(value), 25, 250) end
+	receiveDelayInput.Text = tostring(Automation.receiveDelayMs)
+	Config:Queue()
+end)
+
 Bindings.receive.callback = function() Automation:SetReceive(not Automation.receiveEnabled) end
 Bindings.block.callback = function() Automation:SetBlock(not Automation.blockEnabled) end
 
@@ -1199,7 +1222,8 @@ isPointerOverMenu = function()
 end
 
 connect(RunService.Heartbeat, function()
-	Automation:Step(os.clock())
+	local now = os.clock()
+	Automation:Step(now)
 end)
 
 local function destroy()
@@ -1223,6 +1247,7 @@ Config.capture = function()
 		RotationMode = rotationMode, CustomTurnSpeed = customTurnSpeed,
 		AutoReceiveEnabled = Automation.receiveEnabled, AutoBlockEnabled = Automation.blockEnabled,
 		OneTimeReceive = Automation.receiveOnce, OneTimeBlock = Automation.blockOnce,
+		ReceiveDelayMs = Automation.receiveDelayMs,
 		MenuKey = Bindings.menu.key.Name,
 		ReceiveKey = Bindings.receive.key.Name, ReceiveKeyActive = Bindings.receive.active,
 		BlockKey = Bindings.block.key.Name, BlockKeyActive = Bindings.block.active,
