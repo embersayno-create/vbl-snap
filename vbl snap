@@ -27,6 +27,7 @@ local ConfigDefaults = {
 	AutoReceiveEnabled = false, AutoBlockEnabled = false,
 	OneTimeReceive = false, OneTimeBlock = false,
 	ReceiveDelayMs = 50,
+	ShowReceiveHitbox = false, ReceiveSize = 9,
 	MenuKey = "F1", ReceiveKey = "R", BlockKey = "B", RotationKey = "X",
 	ReceiveKeyActive = true, BlockKeyActive = true, RotationKeyActive = true,
 }
@@ -50,6 +51,9 @@ if readfile and isfile then
 end
 
 if type(savedConfig) == "table" then
+	if savedConfig.ReceiveSize == nil and type(savedConfig.ReceiveWidth) == "number" then
+		Config.values.ReceiveSize = savedConfig.ReceiveWidth
+	end
 	for key, default in pairs(ConfigDefaults) do
 		local value = savedConfig[key]
 		if type(value) == type(default) then Config.values[key] = value end
@@ -101,6 +105,9 @@ function Config:Queue()
 		self:Flush()
 	end)
 end
+
+local savedReceiveSize = Config.values.ReceiveSize
+Config.values.ReceiveSize = savedReceiveSize == savedReceiveSize and math.clamp(savedReceiveSize, 0.5, 50) or 9
 
 local jumpRotationEnabled = Config.values.JumpRotationEnabled
 local rotationMode = Config.values.RotationMode
@@ -231,7 +238,7 @@ local Automation = {
 	nextReceive = 0, nextBlock = 0,
 	receiveDelayMs = Config.values.ReceiveDelayMs,
 	mouseHeld = false, blockHeld = false,
-	receiveHalfSize = Vector3.new(4.5, 4.452707290649414, 3.910921096801758),
+	receiveHalfSize = Vector3.one * (Config.values.ReceiveSize / 2),
 }
 local isPointerOverMenu = function() return false end
 
@@ -270,6 +277,17 @@ function Automation:SetBlock(enabled)
 	Config:Queue()
 end
 
+function Automation:GetReceiveFrame()
+	if not humanoid or not rootPart or humanoid.Health <= 0 then return nil end
+	local head = humanoid.Parent:FindFirstChild("Head")
+	return head and CFrame.new(head.Position) * rootPart.CFrame.Rotation
+end
+
+function Automation:SetReceiveSize(size)
+	self.receiveHalfSize = Vector3.one * (size / 2)
+	Config:Queue()
+end
+
 function Automation:InReceiveHitbox(part, boxFrame)
 	local point = boxFrame:PointToObjectSpace(part.Position)
 	local half = self.receiveHalfSize
@@ -291,8 +309,7 @@ function Automation:Step(now)
 		and now >= self.nextReceive and not isPointerOverMenu()
 	local blockReady = self.blockEnabled and airborne and not self.blockHeld and now >= self.nextBlock
 	if not (receiveReady or blockReady) then return end
-	local head = receiveReady and humanoid.Parent:FindFirstChild("Head")
-	local receiveFrame = head and CFrame.new(head.Position) * rootPart.CFrame.Rotation
+	local receiveFrame = receiveReady and self:GetReceiveFrame()
 	for _, entry in pairs(BallTracker.entries) do
 		local part = entry.part
 		if part then
@@ -329,6 +346,49 @@ end
 function Automation:Destroy()
 	self:SetReceive(false)
 	self:SetBlock(false)
+end
+
+local ReceiveHitboxVisual = { enabled = false }
+ReceiveHitboxVisual.box = Instance.new("BoxHandleAdornment")
+ReceiveHitboxVisual.box.Name = "AutoReceiveHitbox"
+ReceiveHitboxVisual.box.Color3 = Color3.fromRGB(0, 205, 145)
+ReceiveHitboxVisual.box.Transparency = 0.80
+ReceiveHitboxVisual.box.AlwaysOnTop = true
+ReceiveHitboxVisual.box.ZIndex = 1
+ReceiveHitboxVisual.box.Visible = false
+ReceiveHitboxVisual.box.Parent = workspace
+
+function ReceiveHitboxVisual:Update()
+	local frame = self.enabled and Automation:GetReceiveFrame()
+	if not frame then
+		self.box.Visible = false
+		self.box.Adornee = nil
+		return
+	end
+	self.box.Adornee = rootPart
+	self.box.Size = Automation.receiveHalfSize * 2
+	self.box.CFrame = rootPart.CFrame:ToObjectSpace(frame)
+	self.box.Visible = true
+end
+
+function ReceiveHitboxVisual:SetEnabled(enabled)
+	self.enabled = enabled
+	if enabled then
+		if not self.connection then
+			self.connection = RunService.RenderStepped:Connect(function() self:Update() end)
+		end
+	elseif self.connection then
+		self.connection:Disconnect()
+		self.connection = nil
+	end
+	self:Update()
+	if self.refresh then self.refresh() end
+	Config:Queue()
+end
+
+function ReceiveHitboxVisual:Destroy()
+	if self.connection then self.connection:Disconnect() end
+	self.box:Destroy()
 end
 
 local function getAimFacingCFrame(root)
@@ -614,6 +674,7 @@ end
 local vblButton, vblMarker = makeNavButton("VBL", 16)
 local automationButton, automationMarker = makeNavButton("Auto", 60)
 local settingsButton, settingsMarker = makeNavButton("Settings", 104)
+local hitboxButton, hitboxMarker = makeNavButton("Hitbox", 148)
 
 local vblPage = make("Frame", {
 	Name = "VBLPage",
@@ -640,6 +701,17 @@ make("TextLabel", {
 	Font = Enum.Font.Code,
 	TextXAlignment = Enum.TextXAlignment.Left,
 }, automationPage)
+
+local hitboxPage = make("Frame", {
+	Name = "HitboxPage", Size = UDim2.fromScale(1, 1),
+	BackgroundTransparency = 1, Visible = false,
+}, card)
+make("TextLabel", {
+	Name = "SectionTitle", Position = UDim2.fromOffset(9, 6),
+	Size = UDim2.new(1, -18, 0, 25), BackgroundTransparency = 1,
+	Text = "Auto Receive Hitbox", TextColor3 = colors.text,
+	Font = Enum.Font.Code, TextSize = 15, TextXAlignment = Enum.TextXAlignment.Left,
+}, hitboxPage)
 
 local settingsPage = make("Frame", {
 	Name = "SettingsPage",
@@ -797,6 +869,92 @@ local function makeKeybindRow(parent, y, text, binding)
 	binding.render()
 	return row
 end
+
+local receiveHitboxToggle = makeCheckbox(hitboxPage, 44, "Show Receive Hitbox", function()
+	return ReceiveHitboxVisual.enabled
+end, function(value)
+	ReceiveHitboxVisual:SetEnabled(value)
+end)
+ReceiveHitboxVisual.refresh = receiveHitboxToggle.Refresh
+
+local activeSizeSlider
+
+local function makeHitboxSlider(y, title, getValue, setValue)
+	local row = make("Frame", {
+		Name = title, Position = UDim2.fromOffset(8, y),
+		Size = UDim2.new(1, -16, 0, 64), BackgroundTransparency = 1,
+	}, hitboxPage)
+	make("TextLabel", {
+		Size = UDim2.new(1, -100, 0, 22), BackgroundTransparency = 1,
+		Text = title, TextColor3 = colors.muted, Font = Enum.Font.Code,
+		TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left,
+	}, row)
+	local valueLabel = make("TextBox", {
+		Name = "SizeInput",
+		Position = UDim2.new(1, -92, 0, 0), Size = UDim2.fromOffset(92, 22),
+		BackgroundColor3 = colors.background, BorderSizePixel = 0,
+		Text = "", TextColor3 = colors.green, PlaceholderText = "0.5-50",
+		Font = Enum.Font.Code, TextSize = 14, ClearTextOnFocus = false,
+	}, row)
+	make("UIStroke", { Color = colors.border, Thickness = 1 }, valueLabel)
+	local hitArea = make("TextButton", {
+		Name = "Slider", Position = UDim2.fromOffset(0, 28),
+		Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1,
+		BorderSizePixel = 0, Text = "", AutoButtonColor = false,
+	}, row)
+	local track = make("Frame", {
+		Position = UDim2.new(0, 0, 0.5, -3), Size = UDim2.new(1, 0, 0, 6),
+		BackgroundColor3 = colors.border, BorderSizePixel = 0,
+	}, hitArea)
+	make("UICorner", { CornerRadius = UDim.new(0, 3) }, track)
+	local fill = make("Frame", {
+		Size = UDim2.fromScale(0, 1), BackgroundColor3 = colors.green, BorderSizePixel = 0,
+	}, track)
+	make("UICorner", { CornerRadius = UDim.new(0, 3) }, fill)
+	local thumb = make("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5),
+		Size = UDim2.fromOffset(16, 16), BackgroundColor3 = colors.green, BorderSizePixel = 0,
+	}, track)
+	make("UICorner", { CornerRadius = UDim.new(1, 0) }, thumb)
+	local slider = { frame = row, hitArea = hitArea, track = track, valueLabel = valueLabel }
+	function slider:Refresh()
+		local value = getValue()
+		local alpha = math.clamp((value - 0.5) / 49.5, 0, 1)
+		valueLabel.Text = string.format("%.2f", value)
+		fill.Size = UDim2.fromScale(alpha, 1)
+		thumb.Position = UDim2.fromScale(alpha, 0.5)
+	end
+	function slider:UpdateAt(screenX)
+		local inset = GuiService:GetGuiInset()
+		local alpha = math.clamp((screenX - track.AbsolutePosition.X - inset.X) / track.AbsoluteSize.X, 0, 1)
+		local value = math.round((0.5 + alpha * 49.5) * 10) / 10
+		setValue(value)
+		ReceiveHitboxVisual:Update()
+		self:Refresh()
+	end
+	connect(valueLabel.FocusLost, function()
+		local value = tonumber(valueLabel.Text)
+		if value and value == value then
+			setValue(math.round(math.clamp(value, 0.5, 50) * 100) / 100)
+			ReceiveHitboxVisual:Update()
+		end
+		slider:Refresh()
+	end)
+	connect(hitArea.InputBegan, function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			activeSizeSlider = { slider = slider, input = input }
+			slider:UpdateAt(input.Position.X)
+		end
+	end)
+	slider:Refresh()
+	return slider
+end
+
+local receiveSizeSlider = makeHitboxSlider(94, "Hitbox size (studs)", function()
+	return Automation.receiveHalfSize.X * 2
+end, function(value)
+	Automation:SetReceiveSize(value)
+end)
 
 local receiveToggle = makeCheckbox(automationPage, 44, "Auto Receive", function()
 	return Automation.receiveEnabled
@@ -1108,16 +1266,20 @@ make("TextLabel", {
 }, settingsPage)
 
 local function selectPage(pageName)
+	activeSizeSlider = nil
 	cancelKeyCapture()
 	local showVbl = pageName == "VBL"
 	local showAuto = pageName == "Auto"
 	local showSettings = pageName == "Settings"
+	local showHitbox = pageName == "Hitbox"
 	vblPage.Visible, vblMarker.Visible = showVbl, showVbl
 	automationPage.Visible, automationMarker.Visible = showAuto, showAuto
 	settingsPage.Visible, settingsMarker.Visible = showSettings, showSettings
+	hitboxPage.Visible, hitboxMarker.Visible = showHitbox, showHitbox
 	vblButton.TextColor3 = showVbl and colors.text or colors.muted
 	automationButton.TextColor3 = showAuto and colors.text or colors.muted
 	settingsButton.TextColor3 = showSettings and colors.text or colors.muted
+	hitboxButton.TextColor3 = showHitbox and colors.text or colors.muted
 	modeOptions.Visible = false
 end
 
@@ -1129,6 +1291,10 @@ connect(automationButton.Activated, function()
 	selectPage("Auto")
 end)
 
+connect(hitboxButton.Activated, function()
+	selectPage("Hitbox")
+end)
+
 connect(settingsButton.Activated, function()
 	selectPage("Settings")
 end)
@@ -1136,6 +1302,7 @@ end)
 selectPage("VBL")
 
 local function setMenuOpen(isOpen)
+	activeSizeSlider = nil
 	cancelKeyCapture()
 	menuOpen = isOpen
 	window.Visible = isOpen
@@ -1189,6 +1356,14 @@ connect(header.InputBegan, function(input)
 end)
 
 connect(UserInputService.InputChanged, function(input)
+	if activeSizeSlider then
+		local drag = activeSizeSlider
+		if (drag.input.UserInputType == Enum.UserInputType.MouseButton1 and input.UserInputType == Enum.UserInputType.MouseMovement)
+			or (drag.input.UserInputType == Enum.UserInputType.Touch and input == drag.input) then
+			drag.slider:UpdateAt(input.Position.X)
+		end
+		return
+	end
 	if not dragging then
 		return
 	end
@@ -1207,11 +1382,20 @@ connect(UserInputService.InputChanged, function(input)
 end)
 
 connect(UserInputService.InputEnded, function(input)
+	if activeSizeSlider and (input == activeSizeSlider.input
+		or (activeSizeSlider.input.UserInputType == Enum.UserInputType.MouseButton1 and input.UserInputType == Enum.UserInputType.MouseButton1)) then
+		activeSizeSlider = nil
+	end
 	if input.UserInputType == Enum.UserInputType.MouseButton1
 		or input.UserInputType == Enum.UserInputType.Touch then
 		dragging = false
 	end
 end)
+connect(UserInputService.WindowFocusReleased, function()
+	activeSizeSlider = nil
+	dragging = false
+end)
+
 isPointerOverMenu = function()
 	if not window.Visible then return false end
 	local mouse = UserInputService:GetMouseLocation()
@@ -1236,6 +1420,7 @@ local function destroy()
 	cancelSmoothTurn()
 	releaseRotationLock()
 	Automation:Destroy()
+	ReceiveHitboxVisual:Destroy()
 	BallTracker:Destroy()
 	screenGui:Destroy()
 	if environment[sessionKey] == destroy then environment[sessionKey] = nil end
@@ -1248,6 +1433,8 @@ Config.capture = function()
 		AutoReceiveEnabled = Automation.receiveEnabled, AutoBlockEnabled = Automation.blockEnabled,
 		OneTimeReceive = Automation.receiveOnce, OneTimeBlock = Automation.blockOnce,
 		ReceiveDelayMs = Automation.receiveDelayMs,
+		ShowReceiveHitbox = ReceiveHitboxVisual.enabled,
+		ReceiveSize = Automation.receiveHalfSize.X * 2,
 		MenuKey = Bindings.menu.key.Name,
 		ReceiveKey = Bindings.receive.key.Name, ReceiveKeyActive = Bindings.receive.active,
 		BlockKey = Bindings.block.key.Name, BlockKeyActive = Bindings.block.active,
@@ -1257,4 +1444,5 @@ end
 
 connect(screenGui.Destroying, destroy)
 environment[sessionKey] = destroy
+ReceiveHitboxVisual:SetEnabled(Config.values.ShowReceiveHitbox)
 Config:Flush()
