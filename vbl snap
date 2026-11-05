@@ -250,7 +250,7 @@ end
 local Shiftlock = { enabled = Config.values.ShiftlockEnabled }
 
 function Shiftlock:OnJump()
-	if not self.enabled or UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter then return end
+	if UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter then return end
 	local input = Automation:GetInput()
 	input:SendKeyEvent(true, Enum.KeyCode.LeftShift, false, game)
 	input:SendKeyEvent(false, Enum.KeyCode.LeftShift, false, game)
@@ -510,7 +510,7 @@ local function holdFacingUntilLanding(currentHumanoid)
 	end)
 
 	task.delay(2, function()
-		if thisLockId == rotationLockId then
+		if thisLockId == rotationLockId and not hasBeenAirborne then
 			releaseRotationLock()
 		end
 	end)
@@ -528,18 +528,26 @@ connect(UserInputService.JumpRequest, function()
 	if os.clock() - lastJumpTime < JUMP_COOLDOWN then
 		return
 	end
-
-	lastJumpTime = os.clock()
-	Shiftlock:OnJump()
-
-	local targetCFrame = getAimFacingCFrame(rootPart)
-	if not targetCFrame then
+	if Shiftlock.enabled and rotationLockHumanoid == humanoid then
 		return
 	end
 
-	cancelSmoothTurn()
-	holdFacingUntilLanding(humanoid)
-	turnToTarget(rootPart, targetCFrame)
+	lastJumpTime = os.clock()
+	local jumpLockId = rotationLockId
+	task.delay(0.010, function()
+		if jumpLockId ~= rotationLockId then return end
+		local targetCFrame = getAimFacingCFrame(rootPart)
+		if not targetCFrame then return end
+
+		cancelSmoothTurn()
+		holdFacingUntilLanding(humanoid)
+		if Shiftlock.enabled then
+			Shiftlock:OnJump()
+			rootPart.CFrame = targetCFrame
+			return
+		end
+		turnToTarget(rootPart, targetCFrame)
+	end)
 end)
 
 local function make(className, properties, parent)
@@ -1119,6 +1127,8 @@ makeCheckbox(vblPage, 122, "Shiftlock", function()
 	return Shiftlock.enabled
 end, function(value)
 	Shiftlock.enabled = value
+	cancelSmoothTurn()
+	releaseRotationLock()
 	Config:Queue()
 end)
 
