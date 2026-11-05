@@ -23,7 +23,7 @@ local function connect(signal, callback)
 end
 
 local ConfigDefaults = {
-	JumpRotationEnabled = true, RotationMode = "Snap", CustomTurnSpeed = 16,
+	JumpRotationEnabled = true, ShiftlockEnabled = false, RotationMode = "Snap", CustomTurnSpeed = 16,
 	AutoReceiveEnabled = false, AutoBlockEnabled = false,
 	OneTimeReceive = false, OneTimeBlock = false,
 	ReceiveDelayMs = 50,
@@ -245,6 +245,15 @@ local isPointerOverMenu = function() return false end
 function Automation:GetInput()
 	if not self.input then self.input = game:GetService("VirtualInputManager") end
 	return self.input
+end
+
+local Shiftlock = { enabled = Config.values.ShiftlockEnabled }
+
+function Shiftlock:OnJump()
+	if not self.enabled or UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter then return end
+	local input = Automation:GetInput()
+	input:SendKeyEvent(true, Enum.KeyCode.LeftShift, false, game)
+	input:SendKeyEvent(false, Enum.KeyCode.LeftShift, false, game)
 end
 
 function Automation:ReleaseReceive()
@@ -508,7 +517,7 @@ local function holdFacingUntilLanding(currentHumanoid)
 end
 
 connect(UserInputService.JumpRequest, function()
-	if not jumpRotationEnabled or not humanoid or not rootPart or UserInputService:GetFocusedTextBox() then
+	if not jumpRotationEnabled or not humanoid or not rootPart or menuKeyCapture or UserInputService:GetFocusedTextBox() then
 		return
 	end
 
@@ -520,12 +529,13 @@ connect(UserInputService.JumpRequest, function()
 		return
 	end
 
+	lastJumpTime = os.clock()
+	Shiftlock:OnJump()
+
 	local targetCFrame = getAimFacingCFrame(rootPart)
 	if not targetCFrame then
 		return
 	end
-
-	lastJumpTime = os.clock()
 
 	cancelSmoothTurn()
 	holdFacingUntilLanding(humanoid)
@@ -1105,9 +1115,16 @@ make("UIStroke", {
 	Thickness = 1,
 }, modeOptions)
 
+makeCheckbox(vblPage, 122, "Shiftlock", function()
+	return Shiftlock.enabled
+end, function(value)
+	Shiftlock.enabled = value
+	Config:Queue()
+end)
+
 local customSpeedRow = make("Frame", {
 	Name = "CustomSpeedRow",
-	Position = UDim2.new(0, 8, 0, 126),
+	Position = UDim2.new(0, 8, 0, 160),
 	Size = UDim2.new(1, -16, 0, 62),
 	BackgroundTransparency = 1,
 	Visible = rotationMode == "Custom",
@@ -1204,7 +1221,7 @@ Bindings.rotation.callback = function()
 	rotationToggle.Refresh()
 	Config:Queue()
 end
-makeKeybindRow(vblPage, 220, "Rotation key", Bindings.rotation)
+makeKeybindRow(vblPage, 236, "Rotation key", Bindings.rotation)
 
 make("TextLabel", {
 	Position = UDim2.new(0, 9, 0, 8),
@@ -1429,6 +1446,7 @@ end
 Config.capture = function()
 	return {
 		JumpRotationEnabled = jumpRotationEnabled,
+		ShiftlockEnabled = Shiftlock.enabled,
 		RotationMode = rotationMode, CustomTurnSpeed = customTurnSpeed,
 		AutoReceiveEnabled = Automation.receiveEnabled, AutoBlockEnabled = Automation.blockEnabled,
 		OneTimeReceive = Automation.receiveOnce, OneTimeBlock = Automation.blockOnce,
